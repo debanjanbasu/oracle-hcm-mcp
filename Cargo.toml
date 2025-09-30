@@ -21,3 +21,5 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 axum = { version = "0.8", features = ["macros"] }
 reqwest = { version = "0.12", features = ["json"] }
+schemars = "1"
+dotenv = "0.15"

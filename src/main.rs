@@ -1,5 +1,6 @@
 use anyhow::Result;
 use axum::{Router, serve};
+use dotenv::dotenv;
 use rmcp::transport::{
     StreamableHttpService, streamable_http_server::session::local::LocalSessionManager,
 };
@@ -14,6 +15,9 @@ const BIND_ADDRESS: &str = "127.0.0.1:8000";
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load variables from .env file if it exists into the environment
+    dotenv().ok();
+
     // Initialize tracing
     tracing_subscriber::registry()
         .with(
