@@ -1,9 +1,8 @@
-use std::{env, sync::LazyLock};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use axum::http::request;
-use chrono::Local;
-use reqwest::{Body, Method, Response};
+use reqwest::{Body, Method};
 use rmcp::{
+    ErrorData, RoleServer, ServerHandler,
     handler::server::{
         router::{prompt::PromptRouter, tool::ToolRouter},
         wrapper::Parameters,
@@ -16,9 +15,10 @@ use rmcp::{
     prompt_handler, prompt_router,
     schemars::JsonSchema,
     service::RequestContext,
-    tool, tool_handler, tool_router, ErrorData, RoleServer, ServerHandler,
+    tool, tool_handler, tool_router,
 };
 use serde::{Deserialize, Serialize};
+use std::{env, sync::LazyLock};
 use thiserror::Error;
 use tracing::info;
 
@@ -34,8 +34,8 @@ pub enum HcmError {
 impl From<HcmError> for ErrorData {
     fn from(err: HcmError) -> Self {
         match err {
-            HcmError::InvalidParams(msg) => ErrorData::new(ErrorCode::INVALID_PARAMS, msg, None),
-            HcmError::Internal(e) => ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None),
+            HcmError::InvalidParams(msg) => Self::new(ErrorCode::INVALID_PARAMS, msg, None),
+            HcmError::Internal(e) => Self::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None),
         }
     }
 }
@@ -67,7 +67,9 @@ pub struct AbsenceBalanceRequest {
     #[schemars(description = "Unique People ID in Oracle HCM, e.g. 300000578701661")]
     hcm_person_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(description = "Effective date for the balance in DD-MM-YYYY format, e.g. 31-12-2025. Defaults to the HCM's system calculated date if not provided.")]
+    #[schemars(
+        description = "Effective date for the balance in DD-MM-YYYY format, e.g. 31-12-2025. Defaults to the HCM's system calculated date if not provided."
+    )]
     effective_date: Option<String>,
 }
 
@@ -80,7 +82,7 @@ pub struct OracleHCMMCPFactory {
 #[tool_router]
 impl OracleHCMMCPFactory {
     pub fn new() -> Self {
-        OracleHCMMCPFactory {
+        Self {
             tool_router: Self::tool_router(),
             prompt_router: Self::prompt_router(),
         }
@@ -92,7 +94,7 @@ impl OracleHCMMCPFactory {
         method: Method,
         body: Option<Body>,
         enable_framework_version: bool,
-    ) -> Result<Response> {
+    ) -> Result<serde_json::Value> {
         let client = reqwest::Client::new();
         // Build the request based on the HTTP method
         let mut request_builder = match method {
@@ -102,54 +104,62 @@ impl OracleHCMMCPFactory {
         };
 
         // Apply basic authentication using predefined HCM credentials
-        request_builder = request_builder
-            .basic_auth(&*HCM_USERNAME, Some(&*HCM_PASSWORD));
+        request_builder = request_builder.basic_auth(&*HCM_USERNAME, Some(&*HCM_PASSWORD));
 
         // Conditionally add REST-Framework-Version header
         if enable_framework_version {
-            request_builder = request_builder.header("REST-Framework-Version", &*REST_FRAMEWORK_VERSION);
+            request_builder =
+                request_builder.header("REST-Framework-Version", &*REST_FRAMEWORK_VERSION);
         }
 
-        // Finally, send the request and return the response
-        Ok(request_builder.send().await?)
+        // Finally, send the request and return the JSON response
+        let response = request_builder.send().await?;
+        Ok(response.json().await?)
     }
 
-    #[tool(description = "Get Oracle HCM PersonId for a provided Westpac M/F/L id. Example: M061230 is a Westpac Employee ID, but it's corresponding PersonId in Oracle HCM is needed for API/or other Ttool calls to HCM.")]
+    #[tool(
+        description = "Get Oracle HCM PersonId for a provided Westpac M/F/L id. Example: M061230 is a Westpac Employee ID, but it's corresponding PersonId in Oracle HCM is needed for API/or other Ttool calls to HCM."
+    )]
     async fn get_oracle_hcm_person_id_from_westpac_id(
         &self,
         Parameters(args): Parameters<Employee>,
     ) -> Result<CallToolResult, ErrorData> {
-            let westpac_employee_id_uppercase = args.wbc_employee_id.to_uppercase();
-            // Construct the URL for fetching public workers, filtering by worker number
-            // We'll limit to 1 result as WorkerNumber should be unique
-            let url = format!(
-                "{}/hcmRestApi/resources/{}/publicWorkers?q=assignments.WorkerNumber='{}'&onlyData=true&limit=1",
-                &*HCM_BASE_URL, &*HCM_API_VERSION, westpac_employee_id_uppercase
-            );
+        // The Westpac Employee ID is stored in uppercase in HCM
+        let westpac_employee_id_uppercase = args.wbc_employee_id.to_uppercase();
+        // Construct the URL for fetching public workers, filtering by worker number
+        // We'll limit to 1 result as WorkerNumber should be unique
+        let url = format!(
+            "{}/hcmRestApi/resources/{}/publicWorkers?q=assignments.WorkerNumber='{}'&onlyData=true&limit=1",
+            &*HCM_BASE_URL, &*HCM_API_VERSION, westpac_employee_id_uppercase
+        );
 
-            // Make the API call and parse the JSON response
-            let resp = self.hcm_api_call(&url, Method::GET, None, true).await.map_err(HcmError::Internal)?;
-            let json: serde_json::Value = resp.json().await.map_err(|e| HcmError::Internal(e.into()))?;
+        // Make the API call and get the JSON response
+        let json = self
+            .hcm_api_call(&url, Method::GET, None, true)
+            .await
+            .map_err(HcmError::Internal)?;
 
-            // Extract the PersonId from the JSON response using a more concise approach
-            let hcm_person_id = json["items"]
-                .as_array()
-                .and_then(|arr| arr.first())
-                .and_then(|item| item["PersonId"].as_str());
+        // Extract the PersonId from the JSON response using a more concise approach
+        let hcm_person_id = json["items"]
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|item| item["PersonId"].as_str());
 
-            // Create the result content based on whether PersonId was found
-            let result_content = match hcm_person_id {
-                Some(id) => Content::text(id),
-                None => Content::text(format!(
-                    "PersonID not found for Westpac Employee ID: {}",
-                    args.wbc_employee_id
-                )),
-            };
+        // Create the result content based on whether PersonId was found
+        let result_content = match hcm_person_id {
+            Some(id) => Content::text(id),
+            None => Content::text(format!(
+                "PersonID not found for Westpac Employee ID: {}",
+                args.wbc_employee_id
+            )),
+        };
 
-            Ok(CallToolResult::success(vec![result_content]))
+        Ok(CallToolResult::success(vec![result_content]))
     }
 
-    #[tool(description = "Get the absence types which are available in Oracle HCM for a particular employee, based on their PersonId")]
+    #[tool(
+        description = "Get the absence types which are available in Oracle HCM for a particular employee, based on their PersonId"
+    )]
     async fn get_absence_types_for_employee_hcm_person_id(
         &self,
         Parameters(args): Parameters<Employee>,
@@ -165,82 +175,79 @@ impl OracleHCMMCPFactory {
             &*HCM_BASE_URL, &*HCM_API_VERSION, person_id
         );
 
-        // Make the API call and parse the JSON response
-        let resp = self.hcm_api_call(&url, Method::GET, None, true).await.map_err(HcmError::Internal)?;
-        let json: serde_json::Value = resp.json().await.map_err(|e| HcmError::Internal(e.into()))?;
+        // Make the API call and get the JSON response
+        let json = self
+            .hcm_api_call(&url, Method::GET, None, true)
+            .await
+            .map_err(HcmError::Internal)?;
 
         // Extract and format absence types from the JSON response
-        let result_contents: Vec<Content> = json["items"]
-            .as_array()
-            .map(|arr| {
+        let result_contents: Vec<Content> = json["items"].as_array().map_or_else(
+            || vec![Content::text("No absence types found".to_string())],
+            |arr| {
                 arr.iter()
                     .filter_map(|item| {
-                        let id = item["AbsenceTypeId"].as_str();
-                        let name = item["AbsenceTypeName"].as_str();
-                        match (id, name) {
-                            (Some(id), Some(name)) => Some(Content::text(format!("{}: {}", id, name))),
-                            _ => None,
-                        }
+                        let id = item["AbsenceTypeId"].as_str()?;
+                        let name = item["AbsenceTypeName"].as_str()?;
+                        Some(Content::text(format!("{id}: {name}")))
                     })
                     .collect()
-            })
-            .unwrap_or_else(|| vec![Content::text("No absence types found".to_string())]);
+            },
+        );
 
         Ok(CallToolResult::success(result_contents))
     }
 
-    #[tool(description = "Get all absence balances for a particular employee, based on their PersonId and optionally an effective date")]
+    #[tool(
+        description = "Get all absence balances for a particular employee, based on their PersonId and optionally an effective date"
+    )]
     async fn get_all_absence_balances_for_employee_hcm_person_id(
         &self,
-        Parameters(AbsenceBalanceRequest { hcm_person_id, mut effective_date }): Parameters<AbsenceBalanceRequest>,
+        Parameters(AbsenceBalanceRequest {
+            hcm_person_id,
+            effective_date,
+        }): Parameters<AbsenceBalanceRequest>,
     ) -> Result<CallToolResult, ErrorData> {
-        // Use the provided effective_date or default to today's date in DD-MM-YYYY format
-        // effective_date = Some(effective_date.unwrap_or_else(|| {
-        //     Local::now().format("%d-%m-%Y").to_string()
-        // }));
-
         // Construct the URL for fetching plan balances, filtering by PersonId and active plans
+        // If an effective_date is provided, it is used for filtering. Otherwise, no date filter is applied.
         let url = format!(
             "{}/hcmRestApi/resources/{}/planBalances?q=personId={};planDisplayStatusFlag='true'",
             &*HCM_BASE_URL, &*HCM_API_VERSION, hcm_person_id
         );
 
-        // Make the API call and parse the JSON response
-        let resp = self.hcm_api_call(&url, Method::GET, None, false).await.map_err(HcmError::Internal)?;
-        let json: serde_json::Value = resp.json().await.map_err(|e| HcmError::Internal(e.into()))?;
-        
-        // Extract and format absence balances from the JSON response
-        let result_contents: Vec<Content> = json["items"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|item| {
-                        let name = item["planName"].as_str();
-                        let carry_over = item["multiYearCarryOverFlag"].as_bool();
-                        let plan_status = item["planStatusMeaning"].as_str();
-                        let formatted_balance = item["formattedBalance"].as_str();
-                        let balance_calc_date = item["balanceCalculationDate"]
-                            .as_str()
-                            .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
-                            .map(|d| d.format("%d-%m-%Y").to_string());
+        // Make the API call and get the JSON response
+        let json = self
+            .hcm_api_call(&url, Method::GET, None, false)
+            .await
+            .map_err(HcmError::Internal)?;
 
-                        match (name, carry_over, plan_status, formatted_balance, balance_calc_date) {
-                            (Some(name), Some(carry_over), Some(plan_status), Some(formatted_balance), Some(balance_calc_date)) => {
-                                Some(Content::text(format!(
-                                    "Plan Name: \"{}\", Carry Over: {}, Plan Status: \"{}\", Formatted Balance: \"{}\", Balance Calculation Date: \"{}\"",
-                                    name, carry_over, plan_status, formatted_balance, balance_calc_date
-                                )))
-                            }
-                            _ => None,
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_else(|| vec![Content::text("No absence types found".to_string())]);
+        // Extract and format absence balances from the JSON response
+        let result_contents: Vec<Content> = json["items"].as_array()
+            .map_or_else(
+                || vec![Content::text("No absence balances found".to_string())],
+                |arr| {
+                    arr.iter()
+                        .filter_map(|item| {
+                            let name = item["planName"].as_str()?;
+                            let carry_over = item["multiYearCarryOverFlag"].as_bool()?;
+                            let plan_status = item["planStatusMeaning"].as_str()?;
+                            let formatted_balance = item["formattedBalance"].as_str()?;
+                            let balance_calc_date = item["balanceCalculationDate"]
+                                .as_str()
+                                .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+                                // Convert from US to AUS Time Format
+                                .map(|d| d.format("%d-%m-%Y").to_string())?;
+
+                            Some(Content::text(format!(
+                                "Plan Name: {name}, Carry Over: {carry_over}, Plan Status: {plan_status}, Formatted Balance: {formatted_balance}, Balance Calculation Date: {balance_calc_date}"
+                            )))
+                        })
+                        .collect()
+                },
+            );
 
         Ok(CallToolResult::success(result_contents))
     }
-
 }
 
 #[prompt_router]
@@ -258,7 +265,7 @@ impl ServerHandler for OracleHCMMCPFactory {
                 .build(),
             server_info: Implementation::from_build_env(),
             instructions: Some(
-                "Oracle HCM (also know as People HQ) MCP Server with tools prompts and resources"
+                "Oracle HCM (also know as People HQ at Westpac) MCP Server with tools prompts and resources"
                     .to_string(),
             ),
         }

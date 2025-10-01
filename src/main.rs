@@ -2,7 +2,8 @@ use anyhow::Result;
 use axum::{Router, serve};
 use dotenv::dotenv;
 use rmcp::transport::{
-    StreamableHttpService, streamable_http_server::session::local::LocalSessionManager,
+    StreamableHttpServerConfig, StreamableHttpService,
+    streamable_http_server::session::local::LocalSessionManager,
 };
 use tokio::{net::TcpListener, signal};
 use tracing::info;
@@ -32,7 +33,7 @@ async fn main() -> Result<()> {
     let service = StreamableHttpService::new(
         || Ok(OracleHCMMCPFactory::new()),
         LocalSessionManager::default().into(),
-        Default::default(),
+        StreamableHttpServerConfig::default(),
     );
 
     // Start the server

@@ -28,3 +28,14 @@ chrono = "0.4"
 
 [profile.release]
 lto = true
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+nursery = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+string_slice = "deny"
+pedantic = "deny"
