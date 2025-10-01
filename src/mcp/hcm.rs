@@ -114,7 +114,7 @@ impl OracleHCMMCPFactory {
         Ok(request_builder.send().await?)
     }
 
-    #[tool(description = "Get Oracle HCM PersonId for a provided Westpac M/F/L id. Example: M061230 is a Westpac Employee ID, but it's corresponding PersonId in Oracle HCM is needed for API calls to HCM.")]
+    #[tool(description = "Get Oracle HCM PersonId for a provided Westpac M/F/L id. Example: M061230 is a Westpac Employee ID, but it's corresponding PersonId in Oracle HCM is needed for API/or other Ttool calls to HCM.")]
     async fn get_oracle_hcm_person_id_from_westpac_id(
         &self,
         Parameters(args): Parameters<Employee>,
