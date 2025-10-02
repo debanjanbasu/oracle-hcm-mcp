@@ -174,7 +174,7 @@ impl OracleHCMMCPFactory {
 
         // Construct the URL for fetching absence types, filtering by PersonId
         let url = format!(
-            "{}/hcmRestApi/resources/{}/absenceTypesLOV?finder=findByWord;PersonId={}",
+            "{}/hcmRestApi/resources/{}/absenceTypesLOV?onlyData=true&finder=findByWord;PersonId={}",
             &*HCM_BASE_URL, &*HCM_API_VERSION, person_id
         );
 
@@ -202,7 +202,7 @@ impl OracleHCMMCPFactory {
     }
 
     #[tool(
-        description = "Get all absence balances for a particular employee, based on their PersonId (the balances are based off a system calculation date, and not projected balances)."
+        description = "Get all available absence balances and their IDs for a particular employee, based on their PersonId (the balances are based off a system calculation date, and not projected balances)."
     )]
     async fn get_all_absence_balances_for_employee_hcm_person_id(
         &self,
@@ -210,13 +210,13 @@ impl OracleHCMMCPFactory {
     ) -> Result<CallToolResult, ErrorData> {
         // Construct the URL for fetching plan balances, filtering by PersonId
         let url = format!(
-            "{}/hcmRestApi/resources/{}/planBalances?q=personId={};planDisplayStatusFlag='true'",
+            "{}/hcmRestApi/resources/{}/planBalances?onlyData=true&q=personId={};planDisplayStatusFlag=true",
             &*HCM_BASE_URL, &*HCM_API_VERSION, args.hcm_person_id
         );
 
         // Make the API call and get the JSON response
         let json = self
-            .hcm_api_call(&url, Method::GET, None, false)
+            .hcm_api_call(&url, Method::GET, None, true)
             .await
             .map_err(HcmError::Internal)?;
 
@@ -262,27 +262,31 @@ impl OracleHCMMCPFactory {
     ) -> Result<CallToolResult, ErrorData> {
         // Construct the URL for fetching plan balances, filtering by PersonId, PlanId, and balanceAsOfDate.
         let url = format!(
-            "{}/hcmRestApi/resources/{}/planBalances?finder=findByPersonIdPlanIdLevelDate:personId={},planId={},balanceAsOfDate={}",
-            &*HCM_BASE_URL,
-            &*HCM_API_VERSION,
-            hcm_person_id,
-            plan_id.unwrap_or_default(),
-            balance_as_of_date.as_ref().map_or_else(
-                || {
-                    // Default to current date in yyyy-mm-dd format if not provided
-                    let now = chrono::Local::now();
-                    now.format("%Y-%m-%d").to_string()
-                },
-                |date_str| {
-                    chrono::NaiveDate::parse_from_str(date_str, "%d-%m-%Y")
-                        .map_or_else(|_| date_str.clone(), |d| d.format("%Y-%m-%d").to_string()) // Fallback to original if parsing fails
-                },
-            )
+            "{}/hcmRestApi/resources/{}/absences/action/loadProjectedBalance",
+            &*HCM_BASE_URL, &*HCM_API_VERSION,
         );
+        // balance_as_of_date.as_ref().map_or_else(
+        //     || {
+        //         // Default to current date in yyyy-mm-dd format if not provided
+        //         let now = chrono::Local::now();
+        //         now.format("%Y-%m-%d").to_string()
+        //     },
+        //     |date_str| {
+        //         chrono::NaiveDate::parse_from_str(date_str, "%d-%m-%Y")
+        //             .map_or_else(|_| date_str.clone(), |d| d.format("%Y-%m-%d").to_string()) // Fallback to original if parsing fails
+        //     },
+        // );
+
+        // Build the request body
+        // let body = json!({
+        //     "personId": person_id,
+        //     "planId": plan_id,
+        //     "balanceAsOfDate": balance_as_of_date
+        // });
 
         // Make the API call and get the JSON response
         let json = self
-            .hcm_api_call(&url, Method::GET, None, false)
+            .hcm_api_call(&url, Method::GET, None, true)
             .await
             .map_err(HcmError::Internal)?;
 
