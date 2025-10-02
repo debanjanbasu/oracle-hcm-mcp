@@ -58,19 +58,22 @@ pub struct Employee {
     #[schemars(description = "Unique Westpac Employee ID, e.g. M061230")]
     wbc_employee_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(description = "Unique People ID in Oracle HCM, e.g. 300000578701661")]
+    #[schemars(description = "Unique PersonID in Oracle HCM, e.g. 300000578701661")]
     hcm_person_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct AbsenceBalanceRequest {
-    #[schemars(description = "Unique People ID in Oracle HCM, e.g. 300000578701661")]
+    #[schemars(description = "Unique PersonID in Oracle HCM, e.g. 300000578701661")]
     hcm_person_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(
-        description = "Effective date for the balance in DD-MM-YYYY format, e.g. 31-12-2025. Defaults to the HCM's system calculated date if not provided."
+        description = "Effective date (Balance As Of Date) for the balance in DD-MM-YYYY format, e.g. 31-12-2025. Defaults to the HCM's system calculated date if not provided."
     )]
-    effective_date: Option<String>,
+    balance_as_of_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "The PlanID for the absence balance request, e.g. 300100033342761.")]
+    plan_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -118,7 +121,7 @@ impl OracleHCMMCPFactory {
     }
 
     #[tool(
-        description = "Get Oracle HCM PersonId for a provided Westpac M/F/L id. Example: M061230 is a Westpac Employee ID, but it's corresponding PersonId in Oracle HCM is needed for API/or other Ttool calls to HCM."
+        description = "Get Oracle HCM PersonId for a provided Westpac M/F/L id. Example: M061230 is a Westpac Employee ID, but it's corresponding PersonId in Oracle HCM is needed for API/or other Tool calls to HCM."
     )]
     async fn get_oracle_hcm_person_id_from_westpac_id(
         &self,
@@ -199,20 +202,16 @@ impl OracleHCMMCPFactory {
     }
 
     #[tool(
-        description = "Get all absence balances for a particular employee, based on their PersonId and optionally an effective date"
+        description = "Get all absence balances for a particular employee, based on their PersonId (the balances are based off a system calculation date, and not projected balances)."
     )]
     async fn get_all_absence_balances_for_employee_hcm_person_id(
         &self,
-        Parameters(AbsenceBalanceRequest {
-            hcm_person_id,
-            effective_date,
-        }): Parameters<AbsenceBalanceRequest>,
+        Parameters(args): Parameters<AbsenceBalanceRequest>,
     ) -> Result<CallToolResult, ErrorData> {
-        // Construct the URL for fetching plan balances, filtering by PersonId and active plans
-        // If an effective_date is provided, it is used for filtering. Otherwise, no date filter is applied.
+        // Construct the URL for fetching plan balances, filtering by PersonId
         let url = format!(
             "{}/hcmRestApi/resources/{}/planBalances?q=personId={};planDisplayStatusFlag='true'",
-            &*HCM_BASE_URL, &*HCM_API_VERSION, hcm_person_id
+            &*HCM_BASE_URL, &*HCM_API_VERSION, args.hcm_person_id
         );
 
         // Make the API call and get the JSON response
@@ -228,6 +227,7 @@ impl OracleHCMMCPFactory {
                 |arr| {
                     arr.iter()
                         .filter_map(|item| {
+                            let plan_id = item["planId"].as_str()?;
                             let name = item["planName"].as_str()?;
                             let carry_over = item["multiYearCarryOverFlag"].as_bool()?;
                             let plan_status = item["planStatusMeaning"].as_str()?;
@@ -239,7 +239,72 @@ impl OracleHCMMCPFactory {
                                 .map(|d| d.format("%d-%m-%Y").to_string())?;
 
                             Some(Content::text(format!(
-                                "Plan Name: {name}, Carry Over: {carry_over}, Plan Status: {plan_status}, Formatted Balance: {formatted_balance}, Balance Calculation Date: {balance_calc_date}"
+                                "Plan ID: {plan_id}, Plan Name: {name}, Carry Over: {carry_over}, Plan Status: {plan_status}, Formatted Balance: {formatted_balance}, Balance Calculation Date: {balance_calc_date}"
+                            )))
+                        })
+                        .collect()
+                },
+            );
+
+        Ok(CallToolResult::success(result_contents))
+    }
+
+    #[tool(
+        description = "Get projected balance for a particular PersonId as well as a projection date/effective date in DD-MM-YYYY format (Balance As Of Date), for a particular PlanId"
+    )]
+    async fn get_projected_balance(
+        &self,
+        Parameters(AbsenceBalanceRequest {
+            hcm_person_id,
+            plan_id,
+            balance_as_of_date,
+        }): Parameters<AbsenceBalanceRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        // Construct the URL for fetching plan balances, filtering by PersonId, PlanId, and balanceAsOfDate.
+        let url = format!(
+            "{}/hcmRestApi/resources/{}/planBalances?finder=findByPersonIdPlanIdLevelDate:personId={},planId={},balanceAsOfDate={}",
+            &*HCM_BASE_URL,
+            &*HCM_API_VERSION,
+            hcm_person_id,
+            plan_id.unwrap_or_default(),
+            balance_as_of_date.as_ref().map_or_else(
+                || {
+                    // Default to current date in yyyy-mm-dd format if not provided
+                    let now = chrono::Local::now();
+                    now.format("%Y-%m-%d").to_string()
+                },
+                |date_str| {
+                    chrono::NaiveDate::parse_from_str(date_str, "%d-%m-%Y")
+                        .map_or_else(|_| date_str.clone(), |d| d.format("%Y-%m-%d").to_string()) // Fallback to original if parsing fails
+                },
+            )
+        );
+
+        // Make the API call and get the JSON response
+        let json = self
+            .hcm_api_call(&url, Method::GET, None, false)
+            .await
+            .map_err(HcmError::Internal)?;
+
+        // Extract and format projected balance from the JSON response
+        let result_contents: Vec<Content> = json["items"].as_array().map_or_else(
+                || vec![Content::text("No projected balance found for the given criteria.".to_string())],
+                |arr| {
+                    arr.iter()
+                        .filter_map(|item| {
+                            let plan_id = item["planId"].as_str()?;
+                            let name = item["planName"].as_str()?;
+                            let carry_over = item["multiYearCarryOverFlag"].as_bool()?;
+                            let plan_status = item["planStatusMeaning"].as_str()?;
+                            let formatted_balance = item["formattedBalance"].as_str()?;
+                            let balance_calc_date = item["balanceCalculationDate"]
+                                .as_str()
+                                .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+                                // Convert from US to AUS Time Format
+                                .map(|d| d.format("%d-%m-%Y").to_string())?;
+
+                            Some(Content::text(format!(
+                                "Plan ID: {plan_id}, Plan Name: {name}, Carry Over: {carry_over}, Plan Status: {plan_status}, Formatted Balance: {formatted_balance}, Balance Calculation Date: {balance_calc_date}"
                             )))
                         })
                         .collect()
