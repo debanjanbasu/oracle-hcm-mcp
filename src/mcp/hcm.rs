@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{env, sync::LazyLock};
 use thiserror::Error;
-use tracing::{error, info};
+use tracing::info;
 
 // Custom error enum for HCM errors
 #[derive(Error, Debug)]
@@ -31,6 +31,8 @@ pub enum HcmError {
     InvalidParams(String),
     #[error("Internal error: {0}")]
     Internal(#[from] anyhow::Error),
+    #[error("JSON serialization error: {0}")]
+    Serialization(#[from] serde_json::Error),
 }
 
 impl From<HcmError> for ErrorData {
@@ -38,6 +40,7 @@ impl From<HcmError> for ErrorData {
         match err {
             HcmError::InvalidParams(msg) => Self::new(ErrorCode::INVALID_PARAMS, msg, None),
             HcmError::Internal(e) => Self::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None),
+            HcmError::Serialization(e) => Self::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None),
         }
     }
 }
@@ -74,8 +77,15 @@ pub struct AbsenceBalanceRequest {
     )]
     balance_as_of_date: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schemars(description = "The PlanID for the absence balance request, e.g. 300100033342761.")]
-    plan_id: Option<String>,
+    #[schemars(
+        description = "The Absence Type ID for the absence balance request, e.g. 300001058681790."
+    )]
+    absence_type_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        description = "The Legal Entity ID for the absence balance request, e.g. 300000001487001."
+    )]
+    legal_entity_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -179,54 +189,7 @@ impl OracleHCMMCPFactory {
     }
 
     #[tool(
-        description = "Get the absence types which are available in Oracle HCM for a particular employee, based on their PersonId"
-    )]
-    async fn get_absence_types_for_employee_hcm_person_id(
-        &self,
-        Parameters(args): Parameters<Employee>,
-    ) -> Result<CallToolResult, ErrorData> {
-        // Ensure hcm_person_id is provided and not empty, otherwise return an InvalidParams error.
-        let person_id = args
-            .hcm_person_id
-            .filter(|id| !id.is_empty())
-            .ok_or_else(|| {
-                HcmError::InvalidParams("HCM PersonId is required and cannot be empty.".to_string())
-            })?;
-
-        // Construct the URL for fetching absence types, filtering by PersonId
-        let url = format!(
-            "{}/hcmRestApi/resources/{}/absenceTypesLOV?onlyData=true&finder=findByWord;PersonId={}",
-            &*HCM_BASE_URL, &*HCM_API_VERSION, person_id
-        );
-
-        // Make the API call and get the JSON response
-        let json = self
-            .hcm_api_call(&url, Method::GET, None, true)
-            .await
-            .map_err(HcmError::Internal)?;
-
-        // Extract and format absence types from the JSON response
-        let absence_types: Vec<serde_json::Value> =
-            json["items"].as_array().map_or_else(Vec::new, |arr| {
-                arr.iter()
-                    .filter_map(|item| {
-                        let id = item["AbsenceTypeId"].as_str()?;
-                        let name = item["AbsenceTypeName"].as_str()?;
-                        Some(json!({
-                            "AbsenceTypeId": id,
-                            "AbsenceTypeName": name
-                        }))
-                    })
-                    .collect()
-            });
-
-        Ok(CallToolResult::structured(json!({
-            "absence_types": absence_types
-        })))
-    }
-
-    #[tool(
-        description = "Get all available absence balances and their IDs for a particular employee, based on their PersonId (the balances are based off a system calculation date, and not projected balances)."
+        description = "Get all available absence balances for a particular employee, based on their PersonId (the balances are based off a system calculation date, and not projected balances)."
     )]
     async fn get_all_absence_balances_for_employee_hcm_person_id(
         &self,
@@ -259,7 +222,6 @@ impl OracleHCMMCPFactory {
             json["items"].as_array().map_or_else(Vec::new, |arr| {
                 arr.iter()
                     .filter_map(|item| {
-                        let plan_id = item["planId"].as_u64()?;
                         let name = item["planName"].as_str()?;
                         let carry_over = item["multiYearCarryOverFlag"].as_bool()?;
                         let plan_status = item["planStatusMeaning"].as_str()?;
@@ -271,7 +233,6 @@ impl OracleHCMMCPFactory {
                             .map(|d| d.format("%d-%m-%Y").to_string())?;
 
                         Some(json!({
-                            "planId": plan_id,
                             "planName": name,
                             "carryOver": carry_over,
                             "planStatus": plan_status,
@@ -287,78 +248,126 @@ impl OracleHCMMCPFactory {
         })))
     }
 
-    // #[tool(
-    //     description = "Get projected balance for a particular PersonId as well as a projection date/effective date in DD-MM-YYYY format (Balance As Of Date), for a particular PlanId"
-    // )]
-    // async fn get_projected_balance(
-    //     &self,
-    //     Parameters(AbsenceBalanceRequest {
-    //         hcm_person_id,
-    //         plan_id,
-    //         balance_as_of_date,
-    //     }): Parameters<AbsenceBalanceRequest>,
-    // ) -> Result<CallToolResult, ErrorData> {
-    //     // Construct the URL for fetching plan balances, filtering by PersonId, PlanId, and balanceAsOfDate.
-    //     let url = format!(
-    //         "{}/hcmRestApi/resources/{}/absences/action/loadProjectedBalance",
-    //         &*HCM_BASE_URL, &*HCM_API_VERSION,
-    //     );
+    #[tool(
+        description = "Get the absence type IDs, and Employer IDs which are available in Oracle HCM for a particular employee, based on their PersonId. This data is used during projection of employee absence balances."
+    )]
+    async fn get_absence_types_for_employee_hcm_person_id(
+        &self,
+        Parameters(args): Parameters<Employee>,
+    ) -> Result<CallToolResult, ErrorData> {
+        // Ensure hcm_person_id is provided and not empty, otherwise return an InvalidParams error.
+        let person_id = args
+            .hcm_person_id
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                HcmError::InvalidParams("HCM PersonId is required and cannot be empty.".to_string())
+            })?;
 
-    //     // Build the request body
-    //     let body = json!({
-    //         "personId": hcm_person_id,
-    //         "planId": plan_id,
-    //         "balanceAsOfDate": balance_as_of_date.as_ref().map_or_else(
-    //             || {
-    //                 // Default to current date in yyyy-mm-dd format if not provided
-    //                 let now = chrono::Local::now();
-    //                 now.format("%Y-%m-%d").to_string()
-    //             },
-    //             |date_str| {
-    //                 chrono::NaiveDate::parse_from_str(date_str, "%d-%m-%Y")
-    //                     .map_or_else(|_| date_str.clone(), |d| d.format("%Y-%m-%d").to_string()) // Fallback to original if parsing fails
-    //             },
-    //         )
-    //     });
+        // Construct the URL for fetching absence types, filtering by PersonId
+        let url = format!(
+            "{}/hcmRestApi/resources/{}/absenceTypesLOV?onlyData=true&finder=findByWord;PersonId={}",
+            &*HCM_BASE_URL, &*HCM_API_VERSION, person_id
+        );
 
-    //     // Make the API call and get the JSON response
-    //     let json = self
-    //         .hcm_api_call(
-    //             &url,
-    //             Method::POST,
-    //             Some(Body::from(serde_json::to_string(&body)?)),
-    //             true,
-    //         )
-    //         .await
-    //         .map_err(HcmError::Internal)?;
+        // Make the API call and get the JSON response
+        let json = self
+            .hcm_api_call(&url, Method::GET, None, true)
+            .await
+            .map_err(HcmError::Internal)?;
 
-    //     // Extract and format projected balance from the JSON response
-    //     let result_contents: Vec<Content> = json["items"].as_array().map_or_else(
-    //             || vec![Content::text("No projected balance found for the given criteria.".to_string())],
-    //             |arr| {
-    //                 arr.iter()
-    //                     .filter_map(|item| {
-    //                         let plan_id = item["planId"].as_str()?;
-    //                         let name = item["planName"].as_str()?;
-    //                         let carry_over = item["multiYearCarryOverFlag"].as_bool()?;
-    //                         let plan_status = item["planStatusMeaning"].as_str()?;
-    //                         let formatted_balance = item["formattedBalance"].as_str()?;
-    //                         let balance_calc_date = item["balanceCalculationDate"]
-    //                             .as_str()
-    //                             .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
-    //                             // Convert from US to AUS Time Format
-    //                             .map(|d| d.format("%d-%m-%Y").to_string())?;
+        // Extract and format absence types from the JSON response
+        let absence_types: Vec<serde_json::Value> =
+            json["items"].as_array().map_or_else(Vec::new, |arr| {
+                arr.iter()
+                    .filter_map(|item| {
+                        let id = item["AbsenceTypeId"].as_str()?;
+                        let employer_id = item["EmployerId"].as_str()?;
+                        let name = item["AbsenceTypeName"].as_str()?;
+                        Some(json!({
+                            "AbsenceTypeId": id,
+                            "EmployerId": employer_id,
+                            "AbsenceTypeName": name
+                        }))
+                    })
+                    .collect()
+            });
 
-    //                         Some(Content::text(format!(
-    //                             "Plan ID: {plan_id}, Plan Name: {name}, Carry Over: {carry_over}, Plan Status: {plan_status}, Formatted Balance: {formatted_balance}, Balance Calculation Date: {balance_calc_date}"
-    //                         )))
-    //                     })
-    //                     .collect()
-    //             },
-    //         );
+        Ok(CallToolResult::structured(json!({
+            "absence_types": absence_types
+        })))
+    }
 
-    //     Ok(CallToolResult::success(result_contents))
-    // }
+    #[tool(
+        description = "Get projected balance for a particular PersonId as well as a projection date/effective date in DD-MM-YYYY format (Balance As Of Date), for a particular AbsenceTypeId"
+    )]
+    async fn get_projected_balance(
+        &self,
+        Parameters(AbsenceBalanceRequest {
+            hcm_person_id,
+            legal_entity_id,
+            absence_type_id,
+            balance_as_of_date,
+        }): Parameters<AbsenceBalanceRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        // Construct the URL for fetching plan balances, filtering by PersonId, PlanId, and balanceAsOfDate.
+        let url = format!(
+            "{}/hcmRestApi/resources/{}/absences/action/loadProjectedBalance",
+            &*HCM_BASE_URL, &*HCM_API_VERSION,
+        );
+
+        // Mutate the balance_as_of_date to ensure it's in the correct format.
+        // If the provided date is invalid or None, default to the current date.
+        let formatted_balance_as_of_date = balance_as_of_date
+            .as_ref()
+            .and_then(|d| NaiveDate::parse_from_str(d, "%d-%m-%Y").ok())
+            .unwrap_or_else(|| chrono::Local::now().date_naive())
+            .format("%Y-%m-%d")
+            .to_string();
+
+        // Build the request body
+        let request_body = json!({
+            "entry": {
+                "personId": hcm_person_id,
+                "legalEntityId": legal_entity_id,
+                "absenceTypeId": absence_type_id,
+                "openEndedFlag": "N",
+                "startDate": formatted_balance_as_of_date,
+                "endDate": formatted_balance_as_of_date,
+                "uom": "H", // Unit of measure (Hours)
+                "duration": 7.6,
+                "startDateDuration": 7.6,
+                "endDateDuration": 7.6
+            }
+        });
+
+        // Make the API call and get the JSON response
+        let body = Body::from(serde_json::to_string(&request_body).map_err(HcmError::from)?);
+
+        // Make the API call and get the JSON response
+        let json = self
+            .hcm_api_call(&url, Method::POST, Some(body), true)
+            .await
+            .map_err(HcmError::Internal)?;
+
+        // Extract and format projected balance from the JSON response
+        let projected_balance = json["result"]["formattedProjectedBalance"]
+            .as_str()
+            .map_or_else(
+                || {
+                    Err(ErrorData::new(
+                        ErrorCode::INTERNAL_ERROR,
+                        "Failed to parse projected balance from response.".to_string(),
+                        None,
+                    ))
+                },
+                |balance| Ok(balance.to_string()),
+            )?;
+
+        Ok(CallToolResult::structured(json!({
+            "absence_type_id": absence_type_id,
+            "projected_balance": projected_balance
+        })))
+    }
 }
 
 #[prompt_router]
