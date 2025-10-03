@@ -1,5 +1,6 @@
 use anyhow::{Result, anyhow};
 use axum::http::request;
+use chrono::NaiveDate;
 use reqwest::{Body, Method};
 use rmcp::{
     ErrorData, RoleServer, ServerHandler,
@@ -8,19 +9,20 @@ use rmcp::{
         wrapper::Parameters,
     },
     model::{
-        CallToolResult, Content, ErrorCode, GetPromptRequestParam, GetPromptResult, Implementation,
+        CallToolResult, ErrorCode, GetPromptRequestParam, GetPromptResult, Implementation,
         InitializeRequestParam, InitializeResult, ListPromptsResult, PaginatedRequestParam,
         ProtocolVersion, ServerCapabilities, ServerInfo,
     },
     prompt_handler, prompt_router,
-    schemars::JsonSchema,
     service::RequestContext,
     tool, tool_handler, tool_router,
 };
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::{env, sync::LazyLock};
 use thiserror::Error;
-use tracing::info;
+use tracing::{error, info};
 
 // Custom error enum for HCM errors
 #[derive(Error, Debug)]
@@ -127,37 +129,53 @@ impl OracleHCMMCPFactory {
         &self,
         Parameters(args): Parameters<Employee>,
     ) -> Result<CallToolResult, ErrorData> {
-        // The Westpac Employee ID is stored in uppercase in HCM
+        // Use a guard clause for early return on invalid input.
+        if args.wbc_employee_id.is_empty() {
+            return Err(ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                "Westpac Employee ID cannot be empty.".to_string(),
+                None,
+            ));
+        }
+
+        // The HCM API endpoint only accepts uppercase Westpac Employee IDs (that's how it's populated as a result of the Westpac Employee ID being converted to uppercase).
         let westpac_employee_id_uppercase = args.wbc_employee_id.to_uppercase();
-        // Construct the URL for fetching public workers, filtering by worker number
-        // We'll limit to 1 result as WorkerNumber should be unique
+        // The URL for the HCM API endpoint.
         let url = format!(
             "{}/hcmRestApi/resources/{}/publicWorkers?q=assignments.WorkerNumber='{}'&onlyData=true&limit=1",
             &*HCM_BASE_URL, &*HCM_API_VERSION, westpac_employee_id_uppercase
         );
 
-        // Make the API call and get the JSON response
-        let json = self
+        // Execute API call. The `?` operator will automatically propagate any `anyhow::Error`
+        // which will then be converted to `HcmError::Internal` by the `From` trait
+        // and subsequently to `ErrorData` by the `From<HcmError> for ErrorData` implementation.
+        let response_json = self
             .hcm_api_call(&url, Method::GET, None, true)
             .await
             .map_err(HcmError::Internal)?;
 
-        // Extract the PersonId from the JSON response using a more concise approach
-        let hcm_person_id = json["items"]
+        // Attempt to extract PersonId directly.
+        let person_id = response_json["items"]
             .as_array()
-            .and_then(|arr| arr.first())
+            .and_then(|items| items.first())
             .and_then(|item| item["PersonId"].as_str());
 
-        // Create the result content based on whether PersonId was found
-        let result_content = match hcm_person_id {
-            Some(id) => Content::text(id),
-            None => Content::text(format!(
-                "PersonID not found for Westpac Employee ID: {}",
-                args.wbc_employee_id
-            )),
-        };
-
-        Ok(CallToolResult::success(vec![result_content]))
+        // Return the result or an error.
+        person_id.map_or_else(
+            // If person_id is None, return an InvalidParams error.
+            || {
+                Err(ErrorData::new(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "PersonID not found for Westpac Employee ID: {}",
+                        args.wbc_employee_id
+                    ),
+                    None,
+                ))
+            },
+            // If person_id is Some(id), return a success CallToolResult.
+            |id| Ok(CallToolResult::structured(json!({ "PersonId": id }))),
+        )
     }
 
     #[tool(
@@ -167,10 +185,13 @@ impl OracleHCMMCPFactory {
         &self,
         Parameters(args): Parameters<Employee>,
     ) -> Result<CallToolResult, ErrorData> {
-        // Ensure hcm_person_id is provided, otherwise return an InvalidParams error
-        let person_id = args.hcm_person_id.ok_or_else(|| {
-            HcmError::InvalidParams("HCM PersonId is required to fetch absence types.".to_string())
-        })?;
+        // Ensure hcm_person_id is provided and not empty, otherwise return an InvalidParams error.
+        let person_id = args
+            .hcm_person_id
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                HcmError::InvalidParams("HCM PersonId is required and cannot be empty.".to_string())
+            })?;
 
         // Construct the URL for fetching absence types, filtering by PersonId
         let url = format!(
@@ -185,20 +206,23 @@ impl OracleHCMMCPFactory {
             .map_err(HcmError::Internal)?;
 
         // Extract and format absence types from the JSON response
-        let result_contents: Vec<Content> = json["items"].as_array().map_or_else(
-            || vec![Content::text("No absence types found".to_string())],
-            |arr| {
+        let absence_types: Vec<serde_json::Value> =
+            json["items"].as_array().map_or_else(Vec::new, |arr| {
                 arr.iter()
                     .filter_map(|item| {
                         let id = item["AbsenceTypeId"].as_str()?;
                         let name = item["AbsenceTypeName"].as_str()?;
-                        Some(Content::text(format!("{id}: {name}")))
+                        Some(json!({
+                            "AbsenceTypeId": id,
+                            "AbsenceTypeName": name
+                        }))
                     })
                     .collect()
-            },
-        );
+            });
 
-        Ok(CallToolResult::success(result_contents))
+        Ok(CallToolResult::structured(json!({
+            "absence_types": absence_types
+        })))
     }
 
     #[tool(
@@ -208,6 +232,15 @@ impl OracleHCMMCPFactory {
         &self,
         Parameters(args): Parameters<AbsenceBalanceRequest>,
     ) -> Result<CallToolResult, ErrorData> {
+        // Ensure hcm_person_id is not empty.
+        if args.hcm_person_id.is_empty() {
+            return Err(ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                "HCM PersonId cannot be empty.".to_string(),
+                None,
+            ));
+        }
+
         // Construct the URL for fetching plan balances, filtering by PersonId
         let url = format!(
             "{}/hcmRestApi/resources/{}/planBalances?onlyData=true&q=personId={};planDisplayStatusFlag=true",
@@ -216,107 +249,116 @@ impl OracleHCMMCPFactory {
 
         // Make the API call and get the JSON response
         let json = self
-            .hcm_api_call(&url, Method::GET, None, true)
+            // Be careful here, if we pass the REST-Framework-Version: string here, it doesn't respond, as it requires a valid Effective-Of: string as a header as well
+            .hcm_api_call(&url, Method::GET, None, false)
             .await
             .map_err(HcmError::Internal)?;
 
         // Extract and format absence balances from the JSON response
-        let result_contents: Vec<Content> = json["items"].as_array()
-            .map_or_else(
-                || vec![Content::text("No absence balances found".to_string())],
-                |arr| {
-                    arr.iter()
-                        .filter_map(|item| {
-                            let plan_id = item["planId"].as_str()?;
-                            let name = item["planName"].as_str()?;
-                            let carry_over = item["multiYearCarryOverFlag"].as_bool()?;
-                            let plan_status = item["planStatusMeaning"].as_str()?;
-                            let formatted_balance = item["formattedBalance"].as_str()?;
-                            let balance_calc_date = item["balanceCalculationDate"]
-                                .as_str()
-                                .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
-                                // Convert from US to AUS Time Format
-                                .map(|d| d.format("%d-%m-%Y").to_string())?;
+        let absence_balances: Vec<serde_json::Value> =
+            json["items"].as_array().map_or_else(Vec::new, |arr| {
+                arr.iter()
+                    .filter_map(|item| {
+                        let plan_id = item["planId"].as_u64()?;
+                        let name = item["planName"].as_str()?;
+                        let carry_over = item["multiYearCarryOverFlag"].as_bool()?;
+                        let plan_status = item["planStatusMeaning"].as_str()?;
+                        let formatted_balance = item["formattedBalance"].as_str()?;
+                        let balance_calc_date = item["balanceCalculationDate"]
+                            .as_str()
+                            .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+                            // Convert from US to AUS Time Format
+                            .map(|d| d.format("%d-%m-%Y").to_string())?;
 
-                            Some(Content::text(format!(
-                                "Plan ID: {plan_id}, Plan Name: {name}, Carry Over: {carry_over}, Plan Status: {plan_status}, Formatted Balance: {formatted_balance}, Balance Calculation Date: {balance_calc_date}"
-                            )))
-                        })
-                        .collect()
-                },
-            );
+                        Some(json!({
+                            "planId": plan_id,
+                            "planName": name,
+                            "carryOver": carry_over,
+                            "planStatus": plan_status,
+                            "formattedBalance": formatted_balance,
+                            "balanceCalculationDate": balance_calc_date,
+                        }))
+                    })
+                    .collect()
+            });
 
-        Ok(CallToolResult::success(result_contents))
+        Ok(CallToolResult::structured(json!({
+          "absence_balances": absence_balances,
+        })))
     }
 
-    #[tool(
-        description = "Get projected balance for a particular PersonId as well as a projection date/effective date in DD-MM-YYYY format (Balance As Of Date), for a particular PlanId"
-    )]
-    async fn get_projected_balance(
-        &self,
-        Parameters(AbsenceBalanceRequest {
-            hcm_person_id,
-            plan_id,
-            balance_as_of_date,
-        }): Parameters<AbsenceBalanceRequest>,
-    ) -> Result<CallToolResult, ErrorData> {
-        // Construct the URL for fetching plan balances, filtering by PersonId, PlanId, and balanceAsOfDate.
-        let url = format!(
-            "{}/hcmRestApi/resources/{}/absences/action/loadProjectedBalance",
-            &*HCM_BASE_URL, &*HCM_API_VERSION,
-        );
-        // balance_as_of_date.as_ref().map_or_else(
-        //     || {
-        //         // Default to current date in yyyy-mm-dd format if not provided
-        //         let now = chrono::Local::now();
-        //         now.format("%Y-%m-%d").to_string()
-        //     },
-        //     |date_str| {
-        //         chrono::NaiveDate::parse_from_str(date_str, "%d-%m-%Y")
-        //             .map_or_else(|_| date_str.clone(), |d| d.format("%Y-%m-%d").to_string()) // Fallback to original if parsing fails
-        //     },
-        // );
+    // #[tool(
+    //     description = "Get projected balance for a particular PersonId as well as a projection date/effective date in DD-MM-YYYY format (Balance As Of Date), for a particular PlanId"
+    // )]
+    // async fn get_projected_balance(
+    //     &self,
+    //     Parameters(AbsenceBalanceRequest {
+    //         hcm_person_id,
+    //         plan_id,
+    //         balance_as_of_date,
+    //     }): Parameters<AbsenceBalanceRequest>,
+    // ) -> Result<CallToolResult, ErrorData> {
+    //     // Construct the URL for fetching plan balances, filtering by PersonId, PlanId, and balanceAsOfDate.
+    //     let url = format!(
+    //         "{}/hcmRestApi/resources/{}/absences/action/loadProjectedBalance",
+    //         &*HCM_BASE_URL, &*HCM_API_VERSION,
+    //     );
 
-        // Build the request body
-        // let body = json!({
-        //     "personId": person_id,
-        //     "planId": plan_id,
-        //     "balanceAsOfDate": balance_as_of_date
-        // });
+    //     // Build the request body
+    //     let body = json!({
+    //         "personId": hcm_person_id,
+    //         "planId": plan_id,
+    //         "balanceAsOfDate": balance_as_of_date.as_ref().map_or_else(
+    //             || {
+    //                 // Default to current date in yyyy-mm-dd format if not provided
+    //                 let now = chrono::Local::now();
+    //                 now.format("%Y-%m-%d").to_string()
+    //             },
+    //             |date_str| {
+    //                 chrono::NaiveDate::parse_from_str(date_str, "%d-%m-%Y")
+    //                     .map_or_else(|_| date_str.clone(), |d| d.format("%Y-%m-%d").to_string()) // Fallback to original if parsing fails
+    //             },
+    //         )
+    //     });
 
-        // Make the API call and get the JSON response
-        let json = self
-            .hcm_api_call(&url, Method::GET, None, true)
-            .await
-            .map_err(HcmError::Internal)?;
+    //     // Make the API call and get the JSON response
+    //     let json = self
+    //         .hcm_api_call(
+    //             &url,
+    //             Method::POST,
+    //             Some(Body::from(serde_json::to_string(&body)?)),
+    //             true,
+    //         )
+    //         .await
+    //         .map_err(HcmError::Internal)?;
 
-        // Extract and format projected balance from the JSON response
-        let result_contents: Vec<Content> = json["items"].as_array().map_or_else(
-                || vec![Content::text("No projected balance found for the given criteria.".to_string())],
-                |arr| {
-                    arr.iter()
-                        .filter_map(|item| {
-                            let plan_id = item["planId"].as_str()?;
-                            let name = item["planName"].as_str()?;
-                            let carry_over = item["multiYearCarryOverFlag"].as_bool()?;
-                            let plan_status = item["planStatusMeaning"].as_str()?;
-                            let formatted_balance = item["formattedBalance"].as_str()?;
-                            let balance_calc_date = item["balanceCalculationDate"]
-                                .as_str()
-                                .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
-                                // Convert from US to AUS Time Format
-                                .map(|d| d.format("%d-%m-%Y").to_string())?;
+    //     // Extract and format projected balance from the JSON response
+    //     let result_contents: Vec<Content> = json["items"].as_array().map_or_else(
+    //             || vec![Content::text("No projected balance found for the given criteria.".to_string())],
+    //             |arr| {
+    //                 arr.iter()
+    //                     .filter_map(|item| {
+    //                         let plan_id = item["planId"].as_str()?;
+    //                         let name = item["planName"].as_str()?;
+    //                         let carry_over = item["multiYearCarryOverFlag"].as_bool()?;
+    //                         let plan_status = item["planStatusMeaning"].as_str()?;
+    //                         let formatted_balance = item["formattedBalance"].as_str()?;
+    //                         let balance_calc_date = item["balanceCalculationDate"]
+    //                             .as_str()
+    //                             .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+    //                             // Convert from US to AUS Time Format
+    //                             .map(|d| d.format("%d-%m-%Y").to_string())?;
 
-                            Some(Content::text(format!(
-                                "Plan ID: {plan_id}, Plan Name: {name}, Carry Over: {carry_over}, Plan Status: {plan_status}, Formatted Balance: {formatted_balance}, Balance Calculation Date: {balance_calc_date}"
-                            )))
-                        })
-                        .collect()
-                },
-            );
+    //                         Some(Content::text(format!(
+    //                             "Plan ID: {plan_id}, Plan Name: {name}, Carry Over: {carry_over}, Plan Status: {plan_status}, Formatted Balance: {formatted_balance}, Balance Calculation Date: {balance_calc_date}"
+    //                         )))
+    //                     })
+    //                     .collect()
+    //             },
+    //         );
 
-        Ok(CallToolResult::success(result_contents))
-    }
+    //     Ok(CallToolResult::success(result_contents))
+    // }
 }
 
 #[prompt_router]
