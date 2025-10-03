@@ -20,7 +20,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{env, sync::LazyLock};
+use std::{env, sync::LazyLock, time::Duration};
 use thiserror::Error;
 use tracing::info;
 
@@ -109,8 +109,19 @@ impl OracleHCMMCPFactory {
         method: Method,
         body: Option<Body>,
         enable_framework_version: bool,
+        set_timeout: Option<Duration>,
     ) -> Result<serde_json::Value> {
-        let client = reqwest::Client::new();
+        let mut client_builder = reqwest::Client::builder();
+
+        // Conditionally set the timeout based on the `set_timeout` parameter.
+        if let Some(timeout) = set_timeout {
+            // Need to set a high timeout due to the nature of HCM API calls - some responses can take a long time
+            client_builder = client_builder.timeout(timeout);
+        }
+
+        // Build the client with the configured builder
+        let client = client_builder.build()?;
+
         // Build the request based on the HTTP method
         let mut request_builder = match method {
             Method::GET => client.get(url),
@@ -127,9 +138,16 @@ impl OracleHCMMCPFactory {
                 request_builder.header("REST-Framework-Version", &*REST_FRAMEWORK_VERSION);
         }
 
+        // If we're posting, add the following content type header
+        if method == Method::POST {
+            request_builder =
+                request_builder.header("Content-Type", "application/vnd.oracle.adf.action+json");
+        }
+
         // Finally, send the request and return the JSON response
         let response = request_builder.send().await?;
-        Ok(response.json().await?)
+        let json_value: serde_json::Value = response.json().await?;
+        Ok(json_value)
     }
 
     #[tool(
@@ -160,7 +178,7 @@ impl OracleHCMMCPFactory {
         // which will then be converted to `HcmError::Internal` by the `From` trait
         // and subsequently to `ErrorData` by the `From<HcmError> for ErrorData` implementation.
         let response_json = self
-            .hcm_api_call(&url, Method::GET, None, true)
+            .hcm_api_call(&url, Method::GET, None, true, None)
             .await
             .map_err(HcmError::Internal)?;
 
@@ -213,7 +231,7 @@ impl OracleHCMMCPFactory {
         // Make the API call and get the JSON response
         let json = self
             // Be careful here, if we pass the REST-Framework-Version: string here, it doesn't respond, as it requires a valid Effective-Of: string as a header as well
-            .hcm_api_call(&url, Method::GET, None, false)
+            .hcm_api_call(&url, Method::GET, None, false, None)
             .await
             .map_err(HcmError::Internal)?;
 
@@ -271,7 +289,7 @@ impl OracleHCMMCPFactory {
 
         // Make the API call and get the JSON response
         let json = self
-            .hcm_api_call(&url, Method::GET, None, true)
+            .hcm_api_call(&url, Method::GET, None, true, None)
             .await
             .map_err(HcmError::Internal)?;
 
@@ -345,7 +363,14 @@ impl OracleHCMMCPFactory {
 
         // Make the API call and get the JSON response
         let json = self
-            .hcm_api_call(&url, Method::POST, Some(body), true)
+            .hcm_api_call(
+                &url,
+                Method::POST,
+                Some(body),
+                true,
+                // This is special, it takes a  really long time to get the response for this HCM API
+                Some(Duration::from_mins(1)),
+            )
             .await
             .map_err(HcmError::Internal)?;
 
