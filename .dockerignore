@@ -1,0 +1,15 @@
+
+# Ignore all files not essential for the build
+**/*
+
+# Allow necessary files
+!/src
+!/Cargo.toml
+!/Cargo.lock
+
+# Ignore Dockerfile itself and .dockerignore
+Dockerfile
+.dockerignore
+.git
+.gitignore
+target/
