@@ -369,7 +369,7 @@ impl OracleHCMMCPFactory {
                 Some(body),
                 true,
                 // This is special, it takes a  really long time to get the response for this HCM API
-                Some(Duration::from_mins(1)),
+                Some(Duration::from_secs(60)),
             )
             .await
             .map_err(HcmError::Internal)?;
