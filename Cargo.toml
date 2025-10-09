@@ -12,6 +12,7 @@ rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk.git", branch = 
     "auth",
     "elicitation",
     "schemars",
+    "reqwest",
 ] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 serde = { version = "1", features = ["derive"] }
@@ -20,7 +21,7 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 axum = { version = "0.8", features = ["macros"] }
-reqwest = { version = "0.12", features = [
+reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",
     "gzip",
@@ -31,6 +32,7 @@ reqwest = { version = "0.12", features = [
 schemars = "1"
 dotenv = "0.15"
 thiserror = "2"
+oauth2 = { version = "5.0", default-features = false, features = ["rustls-tls"] }
 chrono = "0.4"
 
 [profile.release]

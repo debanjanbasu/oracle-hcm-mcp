@@ -1,2 +1,4 @@
 /target
 /.env
+/cacerts.pem
+.DS_Store

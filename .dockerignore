@@ -6,6 +6,7 @@
 !/src
 !/Cargo.toml
 !/Cargo.lock
+!/cacerts.pem
 
 # Ignore Dockerfile itself and .dockerignore
 Dockerfile
