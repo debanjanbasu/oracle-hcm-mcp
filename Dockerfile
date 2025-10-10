@@ -1,89 +1,87 @@
 # Stage 1: Build the fully static Rust application with Rustls
 FROM rust:alpine AS builder
 
-# Install build dependencies
-RUN apk add --no-cache musl-dev ca-certificates
-
-# Declare build arguments
-ARG TARGETARCH
-
+# Set working directory early.
 WORKDIR /app
 
-# Conditionally install custom CA certificate
-# This is done first to ensure cargo can access private crate registries.
+# Conditionally install custom CA certificate for build-time.
+# This must be the first step if building behind a corporate proxy.
 COPY cacerts.pem .
 RUN if [ -f "cacerts.pem" ]; then \
-        cp cacerts.pem /usr/local/share/ca-certificates/cacerts.crt && \
-        update-ca-certificates; \
+    cp cacerts.pem /usr/local/share/ca-certificates/cacerts.crt && \
+    update-ca-certificates; \
     fi
 
-# Set RUST_TARGET and install toolchain in one layer
-RUN case ${TARGETARCH} in \
-        "amd64") export RUST_TARGET="x86_64-unknown-linux-musl";; \
-        "arm64") export RUST_TARGET="aarch64-unknown-linux-musl";; \
-        *) echo "Unsupported architecture: ${TARGETARCH}" >&2; exit 1;; \
-    esac && \
-    rustup target add ${RUST_TARGET}
+# Install build dependencies for static linking.
+RUN apk add --no-cache musl-dev
 
-# Cache dependencies
+# Declare build arguments and set RUST_TARGET environment variable for subsequent commands.
+ARG TARGETARCH
+RUN case "${TARGETARCH}" in \
+    "amd64") _rust_target="x86_64-unknown-linux-musl";; \
+    "arm64") _rust_target="aarch64-unknown-linux-musl";; \
+    *) echo "Unsupported architecture: ${TARGETARCH}" >&2; exit 1;; \
+    esac && \
+    echo "export RUST_TARGET=${_rust_target}" > /env.sh && \
+    # Source the file to use RUST_TARGET in this layer for rustup
+    . /env.sh && \
+    rustup target add "${RUST_TARGET}"
+
+# Set RUSTFLAGS for a static binary. This applies to all subsequent cargo commands.
+ENV RUSTFLAGS='-C target-feature=+crt-static'
+
+# Cache dependencies. This layer is rebuilt only when Cargo.toml or Cargo.lock change.
 COPY Cargo.toml Cargo.lock ./
 RUN \
     --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
+    . /env.sh && \
     set -eux; \
     mkdir -p src; \
     echo "fn main() {}" > src/main.rs; \
-    case ${TARGETARCH} in \
-        "amd64") RUST_TARGET="x86_64-unknown-linux-musl";; \
-        "arm64") RUST_TARGET="aarch64-unknown-linux-musl";; \
-    esac; \
-    export RUSTFLAGS='-C target-feature=+crt-static'; \
-    cargo build --release --target ${RUST_TARGET}
+    cargo build --release --target "$RUST_TARGET"
 
-# Build the application
+# Build the application.
 COPY src ./src
 RUN \
     --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
+    . /env.sh && \
     set -eux; \
-    case ${TARGETARCH} in \
-        "amd64") RUST_TARGET="x86_64-unknown-linux-musl";; \
-        "arm64") RUST_TARGET="aarch64-unknown-linux-musl";; \
-    esac; \
-    export RUSTFLAGS='-C target-feature=+crt-static'; \
-    cargo build --release --target ${RUST_TARGET}
+    cargo build --release --target "$RUST_TARGET" && \
+    cp "target/$RUST_TARGET/release/oracle-hcm-mcp" /app/oracle-hcm-mcp
 
-# --- Final Stages ---
-
-# Intermediate stage for amd64
-FROM alpine:latest AS release-amd64
-WORKDIR /app
-COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/oracle-hcm-mcp .
-COPY --from=builder /app/cacerts.pem .
-RUN if [ -f "cacerts.pem" ]; then \
-        apk --no-cache add ca-certificates && \
-        mv cacerts.pem /usr/local/share/ca-certificates/cacerts.crt && \
-        update-ca-certificates; \
+# Prepare CA certificates for the final, minimal image.
+# First, copy the system's CA certificates.
+# Then, if a custom CA is provided, append it to the bundle.
+RUN cp /etc/ssl/certs/ca-certificates.crt /app/ca-bundle.crt && \
+    if [ -f "cacerts.pem" ]; then \
+    cat cacerts.pem >> /app/ca-bundle.crt; \
     fi
 
-# Intermediate stage for arm64
-FROM alpine:latest AS release-arm64
-WORKDIR /app
-COPY --from=builder /app/target/aarch64-unknown-linux-musl/release/oracle-hcm-mcp .
-COPY --from=builder /app/cacerts.pem .
-RUN if [ -f "cacerts.pem" ]; then \
-        apk --no-cache add ca-certificates && \
-        mv cacerts.pem /usr/local/share/ca-certificates/cacerts.crt && \
-        update-ca-certificates; \
-    fi
+# --- Final Stage ---
+# Use a distroless static image for a minimal and secure runtime.
+FROM scratch
 
-# Final stage, selects the correct architecture
-ARG TARGETARCH
-FROM release-${TARGETARCH}
-
-# Common metadata and settings
+# Add metadata to the image.
 LABEL org.opencontainers.image.source="https://github.com/debanjanbasu/oracle-hcm-mcp"
 LABEL org.opencontainers.image.description="Oracle HCM MCP"
 
+# Set a default logging level. This can be overridden by the .env file.
+ENV RUST_LOG="info"
+
+# Use a dedicated working directory. This is a best practice and can prevent
+# issues with relative file paths in the application code.
+WORKDIR /app
+
+# Copy the application binary into the working directory.
+COPY --from=builder /app/oracle-hcm-mcp .
+
+# Copy the CA certificate bundle, including the custom CA if provided.
+COPY --from=builder /app/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt
+
+# Expose the application port.
 EXPOSE 8080
-CMD ["/app/oracle-hcm-mcp"]
+
+# Run the application from the working directory.
+CMD ["./oracle-hcm-mcp"]

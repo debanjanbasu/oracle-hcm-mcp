@@ -34,9 +34,9 @@ Building the project for production:
    ```
 2. The project uses Docker for containerization. Ensure you have Docker installed on your machine. The image is built using multi-platform support to ensure compatibility across different architectures.
    ```
-   docker buildx build --platform linux/amd64,linux/arm64 -t oracle-hcm-mcp:latest --push .
+   docker buildx build --platform linux/amd64,linux/arm64 -t <your-dockerhub-username>/oracle-hcm-mcp:latest --push .
    ```
 3. Run the Docker container:
    ```
-   docker run -d -p 8080:8080 --env-file .env oracle-hcm-mcp:latest
+   docker run --name oracle-hcm-mcp -p 8080:8080 --env-file .env <your-dockerhub-username>/oracle-hcm-mcp:latest
    ```
