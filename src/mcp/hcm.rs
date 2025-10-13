@@ -1,7 +1,9 @@
 use anyhow::{Result, anyhow};
 use axum::http::request;
 use chrono::NaiveDate;
-use reqwest::{Body, Method};
+use reqwest::{Body, Method, Request, Response};
+use reqwest_middleware::{ClientBuilder, Result as MiddlewareResult};
+use reqwest_tracing::{TracingMiddleware, ReqwestOtelSpanBackend, reqwest_otel_span, default_on_request_end};
 use rmcp::{
     ErrorData, RoleServer, ServerHandler,
     handler::server::{
@@ -22,7 +24,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{env, sync::LazyLock, time::Duration};
 use thiserror::Error;
-use tracing::info;
+use tracing::{info, Span};
+use http::Extensions;
 
 // Custom error enum for HCM errors
 #[derive(Error, Debug)]
@@ -94,6 +97,26 @@ pub struct OracleHCMMCPFactory {
     prompt_router: PromptRouter<OracleHCMMCPFactory>,
 }
 
+// Custom Tracing Backend for Reqwest to integrate with OpenTelemetry
+struct CustomTracing;
+
+impl ReqwestOtelSpanBackend for CustomTracing {
+    // Create a new span for each request
+    fn on_request_start(req: &Request, _extension: &mut Extensions) -> Span {
+        reqwest_otel_span!(
+            name = "hcm-api-request",
+            req,
+            request_body = req.body().and_then(|b| b.as_bytes()).map(String::from_utf8_lossy).as_deref(),
+            request_headers = ?req.headers(),
+        )
+    }
+
+    // Handle the end of the request, logging the outcome
+    fn on_request_end(span: &Span, outcome: &MiddlewareResult<Response>, _extension: &mut Extensions) {
+        default_on_request_end(span, outcome);
+    }
+}
+
 #[tool_router]
 impl OracleHCMMCPFactory {
     pub fn new() -> Self {
@@ -119,8 +142,10 @@ impl OracleHCMMCPFactory {
             client_builder = client_builder.timeout(timeout);
         }
 
-        // Build the client with the configured builder
-        let client = client_builder.build()?;
+        // Build the client with the configured builder & TracingMiddleware
+        let client = ClientBuilder::new(client_builder.build()?)
+            .with(TracingMiddleware::<CustomTracing>::new())
+            .build();
 
         // Build the request based on the HTTP method
         let mut request_builder = match method {
