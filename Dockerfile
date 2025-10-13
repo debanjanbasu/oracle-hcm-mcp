@@ -28,7 +28,7 @@ RUN case "${TARGETARCH}" in \
     rustup target add "${RUST_TARGET}"
 
 # Set RUSTFLAGS for a static binary. This applies to all subsequent cargo commands.
-ENV RUSTFLAGS='-C target-feature=+crt-static'
+ENV RUSTFLAGS='-C target-feature=+crt-static --cfg reqwest_unstable'
 
 # Cache dependencies. This layer is rebuilt only when Cargo.toml or Cargo.lock change.
 COPY Cargo.toml Cargo.lock ./
@@ -84,4 +84,4 @@ COPY --from=builder /app/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt
 EXPOSE 8080
 
 # Run the application from the working directory.
-CMD ["./oracle-hcm-mcp"]
+ENTRYPOINT ["./oracle-hcm-mcp"]

@@ -36,15 +36,17 @@ Building the project for production:
    ```
    docker buildx build --platform linux/amd64,linux/arm64 -t <your-dockerhub-username>/oracle-hcm-mcp:latest --push .
    ```
-3. Run the Docker container (debug mode turned on for verbose logging):
+3. Run the Docker container (trace mode turned on for verbose logging):
    ```
-   docker run --name oracle-hcm-mcp-debug -p 8080:8080 --env-file .env -e RUST_LOG="debug" debanjanbasu/oracle-hcm-mcp:latest
+   docker run --name oracle-hcm-mcp-debug -p 8080:8080 --env-file .env -e RUST_LOG="trace" debanjanbasu/oracle-hcm-mcp:latest
    ```
 
 Tracing and Logging:
 The application uses the tracing crate for structured logging. You can configure the log level using the RUST_LOG environment variable. For example, to set the log level to debug, you can run:
 ```
 export RUST_LOG="debug"
+OR
+export RUST_LOG="trace"
 ```
 
 For tracing the requests being made from the application, you can use:

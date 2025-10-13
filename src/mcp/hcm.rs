@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{env, sync::LazyLock, time::Duration};
 use thiserror::Error;
-use tracing::{info, Span};
+use tracing::{info, error, Span};
 use http::Extensions;
 
 // Custom error enum for HCM errors
@@ -48,9 +48,15 @@ impl From<HcmError> for ErrorData {
     }
 }
 
+// Load configuration from environment variables
+// Base URL for the Oracle HCM instance
+static HCM_BASE_URL: LazyLock<String> = LazyLock::new(|| {
+    env::var("HCM_BASE_URL").unwrap_or_else(|e| {
+        error!("HCM_BASE_URL must be set: {}", e);
+        std::process::exit(1);
+    })
+});
 // The version of the HCM API to use - the latest during development is 11.13.18.05, so defaulting to it
-static HCM_BASE_URL: LazyLock<String> =
-    LazyLock::new(|| env::var("HCM_BASE_URL").unwrap_or_default());
 static HCM_API_VERSION: LazyLock<String> =
     LazyLock::new(|| env::var("HCM_API_VERSION").unwrap_or_else(|_| "11.13.18.05".to_string()));
 static REST_FRAMEWORK_VERSION: LazyLock<String> =
@@ -58,8 +64,12 @@ static REST_FRAMEWORK_VERSION: LazyLock<String> =
 // Credentials to communicate with HCM
 static HCM_USERNAME: LazyLock<String> =
     LazyLock::new(|| env::var("HCM_USERNAME").unwrap_or_else(|_| "WBC_HR_AGENT".to_string()));
-static HCM_PASSWORD: LazyLock<String> =
-    LazyLock::new(|| env::var("HCM_PASSWORD").unwrap_or_default());
+static HCM_PASSWORD: LazyLock<String> = LazyLock::new(|| {
+    env::var("HCM_PASSWORD").unwrap_or_else(|e| {
+        error!("HCM_PASSWORD must be set: {}", e);
+        std::process::exit(1);
+    })
+});
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct Employee {
@@ -430,7 +440,7 @@ impl ServerHandler for OracleHCMMCPFactory {
         ServerInfo {
             protocol_version: ProtocolVersion::LATEST,
             capabilities: ServerCapabilities::builder()
-                .enable_prompts()
+                // .enable_prompts()
                 .enable_tools()
                 .build(),
             server_info: Implementation::from_build_env(),

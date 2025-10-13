@@ -41,16 +41,13 @@ async fn main() -> Result<()> {
     let router = Router::new().nest_service("/mcp", service);
     let tcp_listener = TcpListener::bind(BIND_ADDRESS).await?;
 
-    // Graceful shutdown on CTRL+C
-    let shutdown = async {
-        signal::ctrl_c().await.unwrap_or_else(|e| {
-            eprintln!("failed to install CTRL+C handler: {e}");
-        });
-    };
-
-    // Finally start the server with graceful shutdown
+    // Finally start the server with graceful shutdown on CTRL+C
     serve(tcp_listener, router)
-        .with_graceful_shutdown(shutdown)
+        .with_graceful_shutdown(async {
+            signal::ctrl_c().await.unwrap_or_else(|e| {
+                eprintln!("failed to install CTRL+C handler: {e}");
+            });
+        })
         .await?;
 
     Ok(())
