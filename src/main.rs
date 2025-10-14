@@ -12,7 +12,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 mod mcp;
 use mcp::hcm::OracleHCMMCPFactory;
 
-const BIND_ADDRESS: &str = "127.0.0.1:8000";
+const BIND_ADDRESS: &str = "0.0.0.0:8080";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -36,13 +36,19 @@ async fn main() -> Result<()> {
         StreamableHttpServerConfig::default(),
     );
 
-    // Start the server
+    // Starting the server... Setting up the router and TCP listener
     info!("Starting server on {}", BIND_ADDRESS);
     let router = Router::new().nest_service("/mcp", service);
     let tcp_listener = TcpListener::bind(BIND_ADDRESS).await?;
-    let _ = serve(tcp_listener, router)
-        .with_graceful_shutdown(async { signal::ctrl_c().await.unwrap_or_default() })
-        .await;
+
+    // Finally start the server with graceful shutdown on CTRL+C
+    serve(tcp_listener, router)
+        .with_graceful_shutdown(async {
+            signal::ctrl_c().await.unwrap_or_else(|e| {
+                eprintln!("failed to install CTRL+C handler: {e}");
+            });
+        })
+        .await?;
 
     Ok(())
 }

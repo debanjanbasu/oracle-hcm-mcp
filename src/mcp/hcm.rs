@@ -1,7 +1,9 @@
 use anyhow::{Result, anyhow};
 use axum::http::request;
 use chrono::NaiveDate;
-use reqwest::{Body, Method};
+use reqwest::{Body, Method, Request, Response};
+use reqwest_middleware::{ClientBuilder, Result as MiddlewareResult};
+use reqwest_tracing::{TracingMiddleware, ReqwestOtelSpanBackend, reqwest_otel_span, default_on_request_end};
 use rmcp::{
     ErrorData, RoleServer, ServerHandler,
     handler::server::{
@@ -22,7 +24,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{env, sync::LazyLock, time::Duration};
 use thiserror::Error;
-use tracing::info;
+use tracing::{info, error, Span};
+use http::Extensions;
 
 // Custom error enum for HCM errors
 #[derive(Error, Debug)]
@@ -45,9 +48,15 @@ impl From<HcmError> for ErrorData {
     }
 }
 
+// Load configuration from environment variables
+// Base URL for the Oracle HCM instance
+static HCM_BASE_URL: LazyLock<String> = LazyLock::new(|| {
+    env::var("HCM_BASE_URL").unwrap_or_else(|e| {
+        error!("HCM_BASE_URL must be set: {}", e);
+        std::process::exit(1);
+    })
+});
 // The version of the HCM API to use - the latest during development is 11.13.18.05, so defaulting to it
-static HCM_BASE_URL: LazyLock<String> =
-    LazyLock::new(|| env::var("HCM_BASE_URL").unwrap_or_default());
 static HCM_API_VERSION: LazyLock<String> =
     LazyLock::new(|| env::var("HCM_API_VERSION").unwrap_or_else(|_| "11.13.18.05".to_string()));
 static REST_FRAMEWORK_VERSION: LazyLock<String> =
@@ -55,8 +64,12 @@ static REST_FRAMEWORK_VERSION: LazyLock<String> =
 // Credentials to communicate with HCM
 static HCM_USERNAME: LazyLock<String> =
     LazyLock::new(|| env::var("HCM_USERNAME").unwrap_or_else(|_| "WBC_HR_AGENT".to_string()));
-static HCM_PASSWORD: LazyLock<String> =
-    LazyLock::new(|| env::var("HCM_PASSWORD").unwrap_or_default());
+static HCM_PASSWORD: LazyLock<String> = LazyLock::new(|| {
+    env::var("HCM_PASSWORD").unwrap_or_else(|e| {
+        error!("HCM_PASSWORD must be set: {}", e);
+        std::process::exit(1);
+    })
+});
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct Employee {
@@ -94,6 +107,26 @@ pub struct OracleHCMMCPFactory {
     prompt_router: PromptRouter<OracleHCMMCPFactory>,
 }
 
+// Custom Tracing Backend for Reqwest to integrate with OpenTelemetry
+struct CustomTracing;
+
+impl ReqwestOtelSpanBackend for CustomTracing {
+    // Create a new span for each request
+    fn on_request_start(req: &Request, _extension: &mut Extensions) -> Span {
+        reqwest_otel_span!(
+            name = "hcm-api-request",
+            req,
+            request_body = req.body().and_then(|b| b.as_bytes()).map(String::from_utf8_lossy).as_deref(),
+            request_headers = ?req.headers(),
+        )
+    }
+
+    // Handle the end of the request, logging the outcome
+    fn on_request_end(span: &Span, outcome: &MiddlewareResult<Response>, _extension: &mut Extensions) {
+        default_on_request_end(span, outcome);
+    }
+}
+
 #[tool_router]
 impl OracleHCMMCPFactory {
     pub fn new() -> Self {
@@ -119,8 +152,10 @@ impl OracleHCMMCPFactory {
             client_builder = client_builder.timeout(timeout);
         }
 
-        // Build the client with the configured builder
-        let client = client_builder.build()?;
+        // Build the client with the configured builder & TracingMiddleware
+        let client = ClientBuilder::new(client_builder.build()?)
+            .with(TracingMiddleware::<CustomTracing>::new())
+            .build();
 
         // Build the request based on the HTTP method
         let mut request_builder = match method {
@@ -369,7 +404,7 @@ impl OracleHCMMCPFactory {
                 Some(body),
                 true,
                 // This is special, it takes a  really long time to get the response for this HCM API
-                Some(Duration::from_mins(1)),
+                Some(Duration::from_secs(60)),
             )
             .await
             .map_err(HcmError::Internal)?;
@@ -405,7 +440,7 @@ impl ServerHandler for OracleHCMMCPFactory {
         ServerInfo {
             protocol_version: ProtocolVersion::LATEST,
             capabilities: ServerCapabilities::builder()
-                .enable_prompts()
+                // .enable_prompts()
                 .enable_tools()
                 .build(),
             server_info: Implementation::from_build_env(),
