@@ -51,14 +51,6 @@ RUN \
     cargo build --release --target "$RUST_TARGET" && \
     cp "target/$RUST_TARGET/release/oracle-hcm-mcp" /app/oracle-hcm-mcp
 
-# Prepare CA certificates for the final, minimal image.
-# First, copy the system's CA certificates.
-# Then, if a custom CA is provided, append it to the bundle.
-RUN cp /etc/ssl/certs/ca-certificates.crt /app/ca-bundle.crt && \
-    if [ -f "cacerts.pem" ]; then \
-    cat cacerts.pem >> /app/ca-bundle.crt; \
-    fi
-
 # --- Final Stage ---
 # Use a scratch image for a minimal and secure runtime.
 FROM scratch AS runtime
@@ -77,11 +69,8 @@ WORKDIR /app
 # Copy the application binary into the working directory.
 COPY --from=builder /app/oracle-hcm-mcp .
 
-# Copy the CA certificate bundle, including the custom CA if provided.
-COPY --from=builder /app/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt
-
 # Expose the application port.
 EXPOSE 8080
 
 # Run the application from the working directory.
-ENTRYPOINT ["./oracle-hcm-mcp"]
+ENTRYPOINT ["/app/oracle-hcm-mcp"]
