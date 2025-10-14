@@ -60,8 +60,8 @@ RUN cp /etc/ssl/certs/ca-certificates.crt /app/ca-bundle.crt && \
     fi
 
 # --- Final Stage ---
-# Use a distroless static image for a minimal and secure runtime.
-FROM scratch
+# Use a scratch image for a minimal and secure runtime.
+FROM scratch AS runtime
 
 # Add metadata to the image.
 LABEL org.opencontainers.image.source="https://github.com/debanjanbasu/oracle-hcm-mcp"
