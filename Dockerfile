@@ -30,8 +30,11 @@ RUN case "${TARGETARCH}" in \
 # Set RUSTFLAGS for a static binary. This applies to all subsequent cargo commands.
 ENV RUSTFLAGS='-C target-feature=+crt-static --cfg reqwest_unstable'
 
-# Cache dependencies. This layer is rebuilt only when Cargo.toml or Cargo.lock change.
+# Cache dependencies. This layer is rebuilt only when Cargo.toml, Cargo.lock or .cargo/config.toml change.
 COPY Cargo.toml Cargo.lock ./
+# Copy the .cargo directory if it exists in the build context.
+# This is necessary if custom Cargo configurations (e.g., config.toml) are used.
+COPY .cargo .cargo/
 RUN \
     --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
