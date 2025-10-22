@@ -5,7 +5,7 @@ use rmcp::transport::{
     StreamableHttpServerConfig, StreamableHttpService,
     streamable_http_server::session::local::LocalSessionManager,
 };
-use tokio::{net::TcpListener, signal};
+use tokio::{net::TcpListener, signal::ctrl_c};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
     // Finally start the server with graceful shutdown on CTRL+C
     serve(tcp_listener, router)
         .with_graceful_shutdown(async {
-            signal::ctrl_c().await.unwrap_or_else(|e| {
+            ctrl_c().await.unwrap_or_else(|e| {
                 eprintln!("failed to install CTRL+C handler: {e}");
             });
         })
