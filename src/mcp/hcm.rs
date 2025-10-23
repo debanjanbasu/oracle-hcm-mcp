@@ -1,9 +1,12 @@
 use anyhow::{Result, anyhow};
 use axum::http::request;
 use chrono::NaiveDate;
+use http::Extensions;
 use reqwest::{Body, Method, Request, Response};
 use reqwest_middleware::{ClientBuilder, Result as MiddlewareResult};
-use reqwest_tracing::{TracingMiddleware, ReqwestOtelSpanBackend, reqwest_otel_span, default_on_request_end};
+use reqwest_tracing::{
+    ReqwestOtelSpanBackend, TracingMiddleware, default_on_request_end, reqwest_otel_span,
+};
 use rmcp::{
     ErrorData, RoleServer, ServerHandler,
     handler::server::{
@@ -24,8 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{env, sync::LazyLock, time::Duration};
 use thiserror::Error;
-use tracing::{info, error, Span};
-use http::Extensions;
+use tracing::{Span, error, info};
 
 // Custom error enum for HCM errors
 #[derive(Error, Debug)]
@@ -103,8 +105,8 @@ pub struct AbsenceBalanceRequest {
 
 #[derive(Clone)]
 pub struct OracleHCMMCPFactory {
-    tool_router: ToolRouter<OracleHCMMCPFactory>,
-    prompt_router: PromptRouter<OracleHCMMCPFactory>,
+    tool_router: ToolRouter<Self>,
+    prompt_router: PromptRouter<Self>,
 }
 
 // Custom Tracing Backend for Reqwest to integrate with OpenTelemetry
@@ -122,7 +124,11 @@ impl ReqwestOtelSpanBackend for CustomTracing {
     }
 
     // Handle the end of the request, logging the outcome
-    fn on_request_end(span: &Span, outcome: &MiddlewareResult<Response>, _extension: &mut Extensions) {
+    fn on_request_end(
+        span: &Span,
+        outcome: &MiddlewareResult<Response>,
+        _extension: &mut Extensions,
+    ) {
         default_on_request_end(span, outcome);
     }
 }
