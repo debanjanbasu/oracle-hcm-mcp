@@ -1,10 +1,11 @@
-use anyhow::Result;
+use anyhow::{Error as AnyhowError, Result};
 use axum::{Router, serve};
 use dotenv::dotenv;
 use rmcp::transport::{
     StreamableHttpServerConfig, StreamableHttpService,
     streamable_http_server::session::local::LocalSessionManager,
 };
+use std::io::{Error as IoError, ErrorKind as IoErrorKind};
 use tokio::{net::TcpListener, signal::ctrl_c};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -31,7 +32,11 @@ async fn main() -> Result<()> {
     // Setting up the Streamable HTTP Service
     info!("Setting up the Streamable HTTP Service from various MCP Factories");
     let service = StreamableHttpService::new(
-        || Ok(OracleHCMMCPFactory::new()),
+        || {
+            OracleHCMMCPFactory::new()
+                .map_err(AnyhowError::from)
+                .map_err(|e| IoError::new(IoErrorKind::Other, e))
+        },
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig::default(),
     );

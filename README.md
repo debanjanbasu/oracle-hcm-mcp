@@ -30,7 +30,7 @@ Building the project for production:
 
 1. The project uses Docker for containerization. Ensure you have Docker installed on your machine. The image is built using multi-platform support to ensure compatibility across different architectures. If there's custom CA certificates needed, add it to the root build folder as `cacerts.pem`.
    ```
-   docker buildx build --platform linux/amd64,linux/arm64 -t <your-dockerhub-username>/oracle-hcm-mcp:latest --push .
+   docker buildx build --platform linux/amd64,linux/arm64 -t <your-dockerhub-username>/oracle-hcm-mcp:latest --no-cache --push .
    ```
 2. (Optional) If you need to interact with services that use a custom internal certificate authority (CA), you can inject your custom CA certificate at runtime.
    **Note:** The final Docker image is based on `scratch` and does not include any system CA certificates. Therefore, custom certificates must be explicitly provided.
