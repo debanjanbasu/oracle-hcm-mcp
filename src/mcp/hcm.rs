@@ -1,7 +1,12 @@
 use anyhow::{Result, anyhow};
 use axum::http::request;
 use chrono::NaiveDate;
-use reqwest::{Body, Method};
+use http::Extensions;
+use reqwest::{Body, Method, Request, Response};
+use reqwest_middleware::{ClientBuilder, Result as MiddlewareResult};
+use reqwest_tracing::{
+    ReqwestOtelSpanBackend, TracingMiddleware, default_on_request_end, reqwest_otel_span,
+};
 use rmcp::{
     ErrorData, RoleServer, ServerHandler,
     handler::server::{
@@ -22,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{env, sync::LazyLock, time::Duration};
 use thiserror::Error;
-use tracing::info;
+use tracing::{Span, info};
 
 // Custom error enum for HCM errors
 #[derive(Error, Debug)]
@@ -45,18 +50,22 @@ impl From<HcmError> for ErrorData {
     }
 }
 
+// Load configuration from environment variables
+// Base URL for the Oracle HCM instance
+static HCM_BASE_URL: LazyLock<Result<String>> = LazyLock::new(|| {
+    env::var("HCM_BASE_URL").map_err(|e| anyhow!("HCM_BASE_URL must be set: {}", e))
+});
 // The version of the HCM API to use - the latest during development is 11.13.18.05, so defaulting to it
-static HCM_BASE_URL: LazyLock<String> =
-    LazyLock::new(|| env::var("HCM_BASE_URL").unwrap_or_default());
-static HCM_API_VERSION: LazyLock<String> =
-    LazyLock::new(|| env::var("HCM_API_VERSION").unwrap_or_else(|_| "11.13.18.05".to_string()));
-static REST_FRAMEWORK_VERSION: LazyLock<String> =
-    LazyLock::new(|| env::var("REST_FRAMEWORK_VERSION").unwrap_or_else(|_| "9".to_string()));
+static HCM_API_VERSION: LazyLock<Result<String>> =
+    LazyLock::new(|| Ok(env::var("HCM_API_VERSION").unwrap_or_else(|_| "11.13.18.05".to_string())));
+static REST_FRAMEWORK_VERSION: LazyLock<Result<String>> =
+    LazyLock::new(|| Ok(env::var("REST_FRAMEWORK_VERSION").unwrap_or_else(|_| "9".to_string())));
 // Credentials to communicate with HCM
-static HCM_USERNAME: LazyLock<String> =
-    LazyLock::new(|| env::var("HCM_USERNAME").unwrap_or_else(|_| "WBC_HR_AGENT".to_string()));
-static HCM_PASSWORD: LazyLock<String> =
-    LazyLock::new(|| env::var("HCM_PASSWORD").unwrap_or_default());
+static HCM_USERNAME: LazyLock<Result<String>> =
+    LazyLock::new(|| Ok(env::var("HCM_USERNAME").unwrap_or_else(|_| "WBC_HR_AGENT".to_string())));
+static HCM_PASSWORD: LazyLock<Result<String>> = LazyLock::new(|| {
+    env::var("HCM_PASSWORD").map_err(|e| anyhow!("HCM_PASSWORD must be set: {}", e))
+});
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct Employee {
@@ -90,17 +99,48 @@ pub struct AbsenceBalanceRequest {
 
 #[derive(Clone)]
 pub struct OracleHCMMCPFactory {
-    tool_router: ToolRouter<OracleHCMMCPFactory>,
-    prompt_router: PromptRouter<OracleHCMMCPFactory>,
+    tool_router: ToolRouter<Self>,
+    prompt_router: PromptRouter<Self>,
+}
+
+// Custom Tracing Backend for Reqwest to integrate with OpenTelemetry
+struct CustomTracing;
+
+impl ReqwestOtelSpanBackend for CustomTracing {
+    // Create a new span for each request
+    fn on_request_start(req: &Request, _extension: &mut Extensions) -> Span {
+        reqwest_otel_span!(
+            name = "hcm-api-request",
+            req,
+            request_body = req.body().and_then(|b| b.as_bytes()).map(String::from_utf8_lossy).as_deref(),
+            request_headers = ?req.headers(),
+        )
+    }
+
+    // Handle the end of the request, logging the outcome
+    fn on_request_end(
+        span: &Span,
+        outcome: &MiddlewareResult<Response>,
+        _extension: &mut Extensions,
+    ) {
+        default_on_request_end(span, outcome);
+    }
 }
 
 #[tool_router]
 impl OracleHCMMCPFactory {
-    pub fn new() -> Self {
-        Self {
+    pub fn new() -> Result<Self> {
+        // Eagerly evaluate LazyLock and propagate errors during initialization
+        let _ = HCM_BASE_URL.as_ref().map_err(|e| anyhow!("Failed to load HCM_BASE_URL: {}", e))?;
+        let _ = HCM_API_VERSION.as_ref().map_err(|e| anyhow!("Failed to load HCM_API_VERSION: {}", e))?;
+        let _ = REST_FRAMEWORK_VERSION.as_ref().map_err(|e| anyhow!("Failed to load REST_FRAMEWORK_VERSION: {}", e))?;
+        let _ = HCM_USERNAME.as_ref().map_err(|e| anyhow!("Failed to load HCM_USERNAME: {}", e))?;
+        let _ = HCM_PASSWORD.as_ref().map_err(|e| anyhow!("Failed to load HCM_PASSWORD: {}", e))?;
+
+        Ok(Self {
             tool_router: Self::tool_router(),
             prompt_router: Self::prompt_router(),
-        }
+        })
     }
 
     async fn hcm_api_call(
@@ -119,8 +159,10 @@ impl OracleHCMMCPFactory {
             client_builder = client_builder.timeout(timeout);
         }
 
-        // Build the client with the configured builder
-        let client = client_builder.build()?;
+        // Build the client with the configured builder & TracingMiddleware
+        let client = ClientBuilder::new(client_builder.build()?)
+            .with(TracingMiddleware::<CustomTracing>::new())
+            .build();
 
         // Build the request based on the HTTP method
         let mut request_builder = match method {
@@ -130,12 +172,12 @@ impl OracleHCMMCPFactory {
         };
 
         // Apply basic authentication using predefined HCM credentials
-        request_builder = request_builder.basic_auth(&*HCM_USERNAME, Some(&*HCM_PASSWORD));
+        request_builder = request_builder.basic_auth(HCM_USERNAME.as_deref().unwrap(), Some(HCM_PASSWORD.as_deref().unwrap()));
 
         // Conditionally add REST-Framework-Version header
         if enable_framework_version {
             request_builder =
-                request_builder.header("REST-Framework-Version", &*REST_FRAMEWORK_VERSION);
+                request_builder.header("REST-Framework-Version", REST_FRAMEWORK_VERSION.as_deref().unwrap());
         }
 
         // If we're posting, add the following content type header
@@ -171,7 +213,7 @@ impl OracleHCMMCPFactory {
         // The URL for the HCM API endpoint.
         let url = format!(
             "{}/hcmRestApi/resources/{}/publicWorkers?q=assignments.WorkerNumber='{}'&onlyData=true&limit=1",
-            &*HCM_BASE_URL, &*HCM_API_VERSION, westpac_employee_id_uppercase
+            HCM_BASE_URL.as_deref().unwrap(), HCM_API_VERSION.as_deref().unwrap(), westpac_employee_id_uppercase
         );
 
         // Execute API call. The `?` operator will automatically propagate any `anyhow::Error`
@@ -225,7 +267,7 @@ impl OracleHCMMCPFactory {
         // Construct the URL for fetching plan balances, filtering by PersonId
         let url = format!(
             "{}/hcmRestApi/resources/{}/planBalances?onlyData=true&q=personId={};planDisplayStatusFlag=true",
-            &*HCM_BASE_URL, &*HCM_API_VERSION, args.hcm_person_id
+            HCM_BASE_URL.as_deref().unwrap(), HCM_API_VERSION.as_deref().unwrap(), args.hcm_person_id
         );
 
         // Make the API call and get the JSON response
@@ -284,7 +326,7 @@ impl OracleHCMMCPFactory {
         // Construct the URL for fetching absence types, filtering by PersonId
         let url = format!(
             "{}/hcmRestApi/resources/{}/absenceTypesLOV?onlyData=true&finder=findByWord;PersonId={}",
-            &*HCM_BASE_URL, &*HCM_API_VERSION, person_id
+            HCM_BASE_URL.as_deref().unwrap(), HCM_API_VERSION.as_deref().unwrap(), person_id
         );
 
         // Make the API call and get the JSON response
@@ -330,7 +372,7 @@ impl OracleHCMMCPFactory {
         // Construct the URL for fetching plan balances, filtering by PersonId, PlanId, and balanceAsOfDate.
         let url = format!(
             "{}/hcmRestApi/resources/{}/absences/action/loadProjectedBalance",
-            &*HCM_BASE_URL, &*HCM_API_VERSION,
+            HCM_BASE_URL.as_deref().unwrap(), HCM_API_VERSION.as_deref().unwrap(),
         );
 
         // Mutate the balance_as_of_date to ensure it's in the correct format.
@@ -369,7 +411,7 @@ impl OracleHCMMCPFactory {
                 Some(body),
                 true,
                 // This is special, it takes a  really long time to get the response for this HCM API
-                Some(Duration::from_mins(1)),
+                Some(Duration::from_secs(60)),
             )
             .await
             .map_err(HcmError::Internal)?;
@@ -405,7 +447,7 @@ impl ServerHandler for OracleHCMMCPFactory {
         ServerInfo {
             protocol_version: ProtocolVersion::LATEST,
             capabilities: ServerCapabilities::builder()
-                .enable_prompts()
+                // .enable_prompts()
                 .enable_tools()
                 .build(),
             server_info: Implementation::from_build_env(),

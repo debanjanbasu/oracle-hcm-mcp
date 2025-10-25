@@ -1,18 +1,19 @@
-use anyhow::Result;
+use anyhow::{Error as AnyhowError, Result};
 use axum::{Router, serve};
 use dotenv::dotenv;
 use rmcp::transport::{
     StreamableHttpServerConfig, StreamableHttpService,
     streamable_http_server::session::local::LocalSessionManager,
 };
-use tokio::{net::TcpListener, signal};
+use std::io::{Error as IoError, ErrorKind as IoErrorKind};
+use tokio::{net::TcpListener, signal::ctrl_c};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod mcp;
 use mcp::hcm::OracleHCMMCPFactory;
 
-const BIND_ADDRESS: &str = "127.0.0.1:8000";
+const BIND_ADDRESS: &str = "0.0.0.0:8080";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -31,18 +32,28 @@ async fn main() -> Result<()> {
     // Setting up the Streamable HTTP Service
     info!("Setting up the Streamable HTTP Service from various MCP Factories");
     let service = StreamableHttpService::new(
-        || Ok(OracleHCMMCPFactory::new()),
+        || {
+            OracleHCMMCPFactory::new()
+                .map_err(AnyhowError::from)
+                .map_err(|e| IoError::new(IoErrorKind::Other, e))
+        },
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig::default(),
     );
 
-    // Start the server
+    // Starting the server... Setting up the router and TCP listener
     info!("Starting server on {}", BIND_ADDRESS);
     let router = Router::new().nest_service("/mcp", service);
     let tcp_listener = TcpListener::bind(BIND_ADDRESS).await?;
-    let _ = serve(tcp_listener, router)
-        .with_graceful_shutdown(async { signal::ctrl_c().await.unwrap_or_default() })
-        .await;
+
+    // Finally start the server with graceful shutdown on CTRL+C
+    serve(tcp_listener, router)
+        .with_graceful_shutdown(async {
+            ctrl_c().await.unwrap_or_else(|e| {
+                eprintln!("failed to install CTRL+C handler: {e}");
+            });
+        })
+        .await?;
 
     Ok(())
 }
