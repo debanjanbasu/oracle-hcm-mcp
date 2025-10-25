@@ -18,16 +18,15 @@ use anyhow::{Result, anyhow};
 use rmcp::{
     ErrorData, RoleServer, ServerHandler,
     handler::server::{
-        router::{prompt::PromptRouter, tool::ToolRouter},
+        router::tool::ToolRouter,
+        wrapper::Parameters,
     },
     model::{
-        InitializeRequestParam, InitializeResult,
+        InitializeRequestParam, InitializeResult, CallToolResult,
         ProtocolVersion, ServerCapabilities, ServerInfo, Implementation,
-        GetPromptRequestParam, GetPromptResult, ListPromptsResult,
-        PaginatedRequestParam,
     },
     service::RequestContext,
-    prompt_handler, tool_handler, prompt_router, tool_router,
+    tool, tool_handler, tool_router,
 };
 use axum::http::request;
 use tracing::info;
@@ -41,10 +40,17 @@ use crate::mcp::http::{
     HCM_PASSWORD,
 };
 
+// Tool modules and commonly used tool types
+use crate::mcp::tools::{
+    absence_balance::{self, AbsenceBalanceRequest},
+    projected_balance,
+    absence_types,
+    person_id::{self, Employee},
+};
+
 #[derive(Clone)]
 pub struct OracleHCMMCPFactory {
     tool_router: ToolRouter<Self>,
-    prompt_router: PromptRouter<Self>,
 }
 
 #[tool_router]
@@ -62,18 +68,56 @@ impl OracleHCMMCPFactory {
         let _ = HCM_PASSWORD.as_ref()
             .map_err(|e| anyhow!("Failed to load HCM_PASSWORD: {e}"))?;
 
-        Ok(Self {
-            tool_router: Self::tool_router(),
-            prompt_router: Self::prompt_router(),
-        })
+        Ok(Self { tool_router: Self::tool_router() })
+    }
+
+    // Thin delegating methods so the `tool_router` proc-macro (which scans
+    // this impl block) can discover and register the tools. These simply
+    // forward to the actual implementations in `mcp::tools::*` so the
+    // implementation remains modular.
+
+    #[tool(
+        description = "Get all available absence balances for a particular employee, based on their PersonId (the balances are based off a system calculation date, and not projected balances)."
+    )]
+    async fn get_all_absence_balances_for_employee_hcm_person_id(
+        &self,
+        params: Parameters<AbsenceBalanceRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        absence_balance::get_all_absence_balances_for_employee_hcm_person_id(params).await
+    }
+
+    #[tool(
+        description = "Get projected balance for a particular PersonId as well as a projection date/effective date in DD-MM-YYYY format (Balance As Of Date), for a particular AbsenceTypeId"
+    )]
+    async fn get_projected_balance(
+        &self,
+        params: Parameters<AbsenceBalanceRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        projected_balance::get_projected_balance(params).await
+    }
+
+    #[tool(
+        description = "Get the absence type IDs, and Employer IDs which are available in Oracle HCM for a particular employee, based on their PersonId. This data is used during projection of employee absence balances."
+    )]
+    async fn get_absence_types_for_employee_hcm_person_id(
+        &self,
+        params: Parameters<Employee>,
+    ) -> Result<CallToolResult, ErrorData> {
+        absence_types::get_absence_types_for_employee_hcm_person_id(params).await
+    }
+
+    #[tool(
+        description = "Get Oracle HCM PersonId for a provided Westpac M/F/L id. Example: M061230 is a Westpac Employee ID, but it's corresponding PersonId in Oracle HCM is needed for API/or other Tool calls to HCM."
+    )]
+    async fn get_oracle_hcm_person_id_from_westpac_id(
+        &self,
+        params: Parameters<Employee>,
+    ) -> Result<CallToolResult, ErrorData> {
+        person_id::get_oracle_hcm_person_id_from_westpac_id(params).await
     }
 }
 
-#[prompt_router]
-impl OracleHCMMCPFactory {}
-
 #[tool_handler]
-#[prompt_handler]
 impl ServerHandler for OracleHCMMCPFactory {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {

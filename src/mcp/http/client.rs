@@ -37,9 +37,6 @@ pub static HCM_PASSWORD: LazyLock<Result<String>> = LazyLock::new(|| {
 });
 
 // Custom Tracing Backend for Reqwest to integrate with OpenTelemetry
-// Note: This struct is used via TracingMiddleware<CustomTracing>, but Rust can't
-// detect this usage statically, hence the dead_code attribute.
-#[allow(dead_code)]
 struct CustomTracing;
 
 impl ReqwestOtelSpanBackend for CustomTracing {
@@ -100,7 +97,6 @@ impl ReqwestOtelSpanBackend for CustomTracing {
 ///     None
 /// ).await?;
 /// ```
-#[allow(dead_code)]
 pub async fn hcm_api_call(
     url: &str,
     method: Method,

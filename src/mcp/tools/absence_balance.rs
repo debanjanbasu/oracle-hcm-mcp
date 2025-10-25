@@ -16,14 +16,12 @@ use rmcp::{
     handler::server::wrapper::Parameters,
     model::{CallToolResult, ErrorCode},
     ErrorData,
-    tool,
 };
 use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
 use serde_json::json;
 
 #[derive(Serialize, Deserialize, JsonSchema)]
-#[allow(dead_code)] // Used through MCP API
 pub struct AbsenceBalanceRequest {
     #[schemars(description = "Unique PersonID in Oracle HCM, e.g. 300000578701661")]
     pub hcm_person_id: String,
@@ -44,9 +42,6 @@ pub struct AbsenceBalanceRequest {
     pub legal_entity_id: Option<String>,
 }
 
-#[tool(
-    description = "Get all available absence balances for a particular employee, based on their PersonId (the balances are based off a system calculation date, and not projected balances)."
-)]
 pub async fn get_all_absence_balances_for_employee_hcm_person_id(
     Parameters(args): Parameters<AbsenceBalanceRequest>,
 ) -> Result<CallToolResult, ErrorData> {

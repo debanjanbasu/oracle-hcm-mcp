@@ -17,13 +17,9 @@ use rmcp::{
     handler::server::wrapper::Parameters,
     model::CallToolResult,
     ErrorData,
-    tool,
 };
 use serde_json::json;
 
-#[tool(
-    description = "Get the absence type IDs, and Employer IDs which are available in Oracle HCM for a particular employee, based on their PersonId. This data is used during projection of employee absence balances."
-)]
 pub async fn get_absence_types_for_employee_hcm_person_id(
     Parameters(args): Parameters<Employee>,
 ) -> Result<CallToolResult, ErrorData> {

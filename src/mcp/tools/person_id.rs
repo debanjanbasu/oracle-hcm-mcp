@@ -10,14 +10,12 @@ use rmcp::{
     handler::server::wrapper::Parameters,
     model::{CallToolResult, ErrorCode},
     ErrorData,
-    tool,
 };
 use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
 use serde_json::json;
 
 #[derive(Serialize, Deserialize, JsonSchema)]
-#[allow(dead_code)] // Used through MCP API
 pub struct Employee {
     #[schemars(description = "Unique Westpac Employee ID, e.g. M061230")]
     pub wbc_employee_id: String,
@@ -26,9 +24,6 @@ pub struct Employee {
     pub hcm_person_id: Option<String>,
 }
 
-#[tool(
-    description = "Get Oracle HCM PersonId for a provided Westpac M/F/L id. Example: M061230 is a Westpac Employee ID, but it's corresponding PersonId in Oracle HCM is needed for API/or other Tool calls to HCM."
-)]
 pub async fn get_oracle_hcm_person_id_from_westpac_id(
     Parameters(args): Parameters<Employee>,
 ) -> Result<CallToolResult, ErrorData> {

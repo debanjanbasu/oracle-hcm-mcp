@@ -20,14 +20,10 @@ use rmcp::{
     handler::server::wrapper::Parameters,
     model::{CallToolResult, ErrorCode},
     ErrorData,
-    tool,
 };
 use serde_json::json;
 use std::time::Duration;
 
-#[tool(
-    description = "Get projected balance for a particular PersonId as well as a projection date/effective date in DD-MM-YYYY format (Balance As Of Date), for a particular AbsenceTypeId"
-)]
 pub async fn get_projected_balance(
     Parameters(AbsenceBalanceRequest {
         hcm_person_id,
