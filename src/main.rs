@@ -17,10 +17,13 @@ const BIND_ADDRESS: &str = "0.0.0.0:8080";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Load variables from .env file if it exists into the environment
+    // Load environment variables from .env file for configuration
+    // Continues even if .env doesn't exist (ok() handles the Result)
     dotenv().ok();
 
-    // Initialize tracing
+    // Initialize structured logging with tracing
+    // Uses RUST_LOG env var if set, defaults to "debug" level
+    // Format: error/warn/info/debug/trace
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -40,12 +43,15 @@ async fn main() -> Result<()> {
         StreamableHttpServerConfig::default(),
     );
 
-    // Starting the server... Setting up the router and TCP listener
+    // Set up HTTP server components:
+    // 1. Router with /mcp endpoint for our MCP service
+    // 2. TCP listener on configured address
     info!("Starting server on {}", BIND_ADDRESS);
     let router = Router::new().nest_service("/mcp", service);
     let tcp_listener = TcpListener::bind(BIND_ADDRESS).await?;
 
-    // Finally start the server with graceful shutdown on CTRL+C
+    // Start server with graceful shutdown handling
+    // Waits for all in-flight requests to complete on CTRL+C
     serve(tcp_listener, router)
         .with_graceful_shutdown(async {
             ctrl_c().await.unwrap_or_else(|e| {

@@ -36,10 +36,18 @@ pub static HCM_PASSWORD: LazyLock<Result<String>> = LazyLock::new(|| {
     env::var("HCM_PASSWORD").map_err(|e| anyhow!("HCM_PASSWORD must be set: {e}"))
 });
 
-// Custom Tracing Backend for Reqwest to integrate with OpenTelemetry
+/// Custom tracing implementation for Oracle HCM API requests
+/// 
+/// This backend integrates with OpenTelemetry to provide:
+/// - Request timing and latency tracking
+/// - Headers and body content (sanitized)
+/// - Error states and outcomes
+/// - Request/response correlation
 struct CustomTracing;
 
 impl ReqwestOtelSpanBackend for CustomTracing {
+    /// Start a new trace span for an outgoing request
+    /// Creates spans with request details but sanitizes sensitive data
     fn on_request_start(req: &Request, _extension: &mut Extensions) -> Span {
         reqwest_otel_span!(
             name = "hcm-api-request",
@@ -49,6 +57,8 @@ impl ReqwestOtelSpanBackend for CustomTracing {
         )
     }
 
+    /// Close the trace span and record the outcome
+    /// Uses default behavior which adds response status and timing
     fn on_request_end(
         span: &Span,
         outcome: &MiddlewareResult<Response>,
@@ -58,34 +68,40 @@ impl ReqwestOtelSpanBackend for CustomTracing {
     }
 }
 
-// Required because usage through re-exports isn't detected by the compiler
-/// Makes an authenticated request to the Oracle HCM REST API.
+/// Makes an authenticated HTTP request to the Oracle HCM REST API with tracing and error handling.
+/// 
+/// Creates a traced, authenticated request with proper timeouts and headers for Oracle HCM.
+/// Handles common failure cases and provides detailed error information.
+///
+/// # Configuration
+/// Uses environment variables for base configuration:
+/// - `HCM_USERNAME` - API authentication username
+/// - `HCM_PASSWORD` - API authentication password
+/// - `REST_FRAMEWORK_VERSION` - Required API compatibility version
+///
+/// # Request Details
+/// * Headers automatically added:
+///   - Basic Auth from credentials
+///   - Content-Type for POST requests
+///   - REST-Framework-Version when enabled
+/// * Default timeout: 30 seconds
+/// * Methods supported: GET, POST
 ///
 /// # Arguments
-/// * `url` - The complete URL for the HCM API endpoint
-/// * `method` - HTTP method (currently supports GET and POST)
-/// * `body` - Optional request body, primarily used for POST requests
-/// * `enable_framework_version` - Whether to include the REST-Framework-Version header
-///   - Required for most endpoints except those requiring Effective-Of header
-///   - Defaults to true for standard endpoints
-/// * `set_timeout` - Custom timeout duration
-///   - Some HCM operations (like projected balance) need longer timeouts
-///   - Defaults to 30 seconds if not specified
+/// * `url` - Complete URL for the HCM API endpoint
+/// * `method` - HTTP method (GET/POST only)
+/// * `body` - Optional request body for POST requests
+/// * `enable_framework_version` - Add REST-Framework-Version header
+///   * Required for most endpoints except those using Effective-Of
+/// * `set_timeout` - Custom timeout (some operations need longer)
 ///
 /// # Returns
-/// A Result containing either:
-/// * `Ok(Value)` - JSON response from the API
-/// * `Err(HcmError)` - Error details if the request fails
-///
-/// # Errors
-/// Returns `HcmError` in the following cases:
-/// * `InvalidParams` - Unsupported HTTP method
-/// * `MissingConfig` - Required environment variables not set
-/// * `Http` - Network or API request failures
-/// * `Serialization` - JSON parsing errors
-///
-/// # Authentication
-/// Uses basic authentication with `HCM_USERNAME` and `HCM_PASSWORD` environment variables.
+/// * `Ok(Value)` - Parsed JSON response
+/// * `Err(HcmError)` - Structured error information:
+///   * `InvalidParams` - Bad method/request
+///   * `MissingConfig` - Environment not set
+///   * `Http` - Network/API failures
+///   * `Serialization` - JSON parse errors
 ///
 /// # Example
 /// ```no_run

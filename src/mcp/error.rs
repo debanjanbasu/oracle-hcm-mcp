@@ -15,21 +15,27 @@ use rmcp::model::ErrorCode;
 
 #[derive(Error, Debug)]
 pub enum HcmError {
+    /// Error for invalid input parameters or request validation failures
     #[error("Invalid parameters: {0}")]
     InvalidParams(String),
 
+    /// Error when required environment variables or configuration is missing
     #[error("Missing configuration: {0}")]
     MissingConfig(String),
 
+    /// Error during HTTP request execution (network issues, timeouts, etc.)
     #[error("HTTP request error: {0}")]
     Http(#[from] reqwest::Error),
 
+    /// Error from HTTP middleware stack (tracing, retries, etc.)
     #[error("HTTP middleware error: {0}")]
     HttpMiddleware(#[from] reqwest_middleware::Error),
 
+    /// Error during JSON serialization or deserialization
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
+    /// Catch-all for other internal errors
     #[error("Internal error: {0}")]
     Internal(#[from] anyhow::Error),
 }

@@ -56,18 +56,28 @@ pub struct OracleHCMMCPFactory {
 #[tool_router]
 impl OracleHCMMCPFactory {
     pub fn new() -> Result<Self> {
-        // Eagerly evaluate LazyLock and propagate errors during initialization
+        // Eagerly evaluate all LazyLock configurations to ensure they're valid
+        // This fails fast if any required config is missing or invalid
+        
+        // Required: Base URL for Oracle HCM API
         let _ = HCM_BASE_URL.as_ref()
             .map_err(|e| anyhow!("Failed to load HCM_BASE_URL: {e}"))?;
+        
+        // API version - critical for request compatibility
         let _ = HCM_API_VERSION.as_ref()
             .map_err(|e| anyhow!("Failed to load HCM_API_VERSION: {e}"))?;
+        
+        // Required header for most endpoints
         let _ = REST_FRAMEWORK_VERSION.as_ref()
             .map_err(|e| anyhow!("Failed to load REST_FRAMEWORK_VERSION: {e}"))?;
+        
+        // Authentication credentials
         let _ = HCM_USERNAME.as_ref()
             .map_err(|e| anyhow!("Failed to load HCM_USERNAME: {e}"))?;
         let _ = HCM_PASSWORD.as_ref()
             .map_err(|e| anyhow!("Failed to load HCM_PASSWORD: {e}"))?;
 
+        // Initialize with tool router loaded from macro-generated code
         Ok(Self { tool_router: Self::tool_router() })
     }
 
