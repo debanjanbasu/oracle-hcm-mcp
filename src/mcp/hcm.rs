@@ -34,18 +34,28 @@ use tracing::{Span, info};
 pub enum HcmError {
     #[error("Invalid parameters: {0}")]
     InvalidParams(String),
+
+    #[error("Missing configuration: {0}")]
+    MissingConfig(String),
+
+    #[error("HTTP request error: {0}")]
+    Http(#[from] reqwest::Error),
+
+    #[error("Serialization error: {0}")]
+    Serialization(#[from] serde_json::Error),
+
     #[error("Internal error: {0}")]
     Internal(#[from] anyhow::Error),
-    #[error("JSON serialization error: {0}")]
-    Serialization(#[from] serde_json::Error),
 }
 
 impl From<HcmError> for ErrorData {
     fn from(err: HcmError) -> Self {
         match err {
             HcmError::InvalidParams(msg) => Self::new(ErrorCode::INVALID_PARAMS, msg, None),
-            HcmError::Internal(e) => Self::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None),
+            HcmError::MissingConfig(msg) => Self::new(ErrorCode::INTERNAL_ERROR, msg, None),
+            HcmError::Http(e) => Self::new(ErrorCode::INTERNAL_ERROR, format!("HTTP error: {e}"), None),
             HcmError::Serialization(e) => Self::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None),
+            HcmError::Internal(e) => Self::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None),
         }
     }
 }
@@ -53,7 +63,7 @@ impl From<HcmError> for ErrorData {
 // Load configuration from environment variables
 // Base URL for the Oracle HCM instance
 static HCM_BASE_URL: LazyLock<Result<String>> = LazyLock::new(|| {
-    env::var("HCM_BASE_URL").map_err(|e| anyhow!("HCM_BASE_URL must be set: {}", e))
+    env::var("HCM_BASE_URL").map_err(|e| anyhow!("HCM_BASE_URL must be set: {e}"))
 });
 // The version of the HCM API to use - the latest during development is 11.13.18.05, so defaulting to it
 static HCM_API_VERSION: LazyLock<Result<String>> =
@@ -64,7 +74,7 @@ static REST_FRAMEWORK_VERSION: LazyLock<Result<String>> =
 static HCM_USERNAME: LazyLock<Result<String>> =
     LazyLock::new(|| Ok(env::var("HCM_USERNAME").unwrap_or_else(|_| "WBC_HR_AGENT".to_string())));
 static HCM_PASSWORD: LazyLock<Result<String>> = LazyLock::new(|| {
-    env::var("HCM_PASSWORD").map_err(|e| anyhow!("HCM_PASSWORD must be set: {}", e))
+    env::var("HCM_PASSWORD").map_err(|e| anyhow!("HCM_PASSWORD must be set: {e}"))
 });
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -131,11 +141,11 @@ impl ReqwestOtelSpanBackend for CustomTracing {
 impl OracleHCMMCPFactory {
     pub fn new() -> Result<Self> {
         // Eagerly evaluate LazyLock and propagate errors during initialization
-        let _ = HCM_BASE_URL.as_ref().map_err(|e| anyhow!("Failed to load HCM_BASE_URL: {}", e))?;
-        let _ = HCM_API_VERSION.as_ref().map_err(|e| anyhow!("Failed to load HCM_API_VERSION: {}", e))?;
-        let _ = REST_FRAMEWORK_VERSION.as_ref().map_err(|e| anyhow!("Failed to load REST_FRAMEWORK_VERSION: {}", e))?;
-        let _ = HCM_USERNAME.as_ref().map_err(|e| anyhow!("Failed to load HCM_USERNAME: {}", e))?;
-        let _ = HCM_PASSWORD.as_ref().map_err(|e| anyhow!("Failed to load HCM_PASSWORD: {}", e))?;
+        let _ = HCM_BASE_URL.as_ref().map_err(|e| anyhow!("Failed to load HCM_BASE_URL: {e}"))?;
+        let _ = HCM_API_VERSION.as_ref().map_err(|e| anyhow!("Failed to load HCM_API_VERSION: {e}"))?;
+        let _ = REST_FRAMEWORK_VERSION.as_ref().map_err(|e| anyhow!("Failed to load REST_FRAMEWORK_VERSION: {e}"))?;
+        let _ = HCM_USERNAME.as_ref().map_err(|e| anyhow!("Failed to load HCM_USERNAME: {e}"))?;
+        let _ = HCM_PASSWORD.as_ref().map_err(|e| anyhow!("Failed to load HCM_PASSWORD: {e}"))?;
 
         Ok(Self {
             tool_router: Self::tool_router(),
@@ -164,6 +174,14 @@ impl OracleHCMMCPFactory {
             .with(TracingMiddleware::<CustomTracing>::new())
             .build();
 
+        // Resolve configuration safely (avoid unwrap)
+        let username = HCM_USERNAME
+            .as_ref()
+            .map_err(|e| HcmError::MissingConfig(e.to_string()))?;
+        let password = HCM_PASSWORD
+            .as_ref()
+            .map_err(|e| HcmError::MissingConfig(e.to_string()))?;
+
         // Build the request based on the HTTP method
         let mut request_builder = match method {
             Method::GET => client.get(url),
@@ -172,12 +190,14 @@ impl OracleHCMMCPFactory {
         };
 
         // Apply basic authentication using predefined HCM credentials
-        request_builder = request_builder.basic_auth(HCM_USERNAME.as_deref().unwrap(), Some(HCM_PASSWORD.as_deref().unwrap()));
+        request_builder = request_builder.basic_auth(username.as_str(), Some(password.as_str()));
 
-        // Conditionally add REST-Framework-Version header
+        // Conditionally add REST-Framework-Version header (fail early if missing)
         if enable_framework_version {
-            request_builder =
-                request_builder.header("REST-Framework-Version", REST_FRAMEWORK_VERSION.as_deref().unwrap());
+            let rf_version = REST_FRAMEWORK_VERSION
+                .as_ref()
+                .map_err(|e| HcmError::MissingConfig(e.to_string()))?;
+            request_builder = request_builder.header("REST-Framework-Version", rf_version.as_str());
         }
 
         // If we're posting, add the following content type header
@@ -211,9 +231,15 @@ impl OracleHCMMCPFactory {
         // The HCM API endpoint only accepts uppercase Westpac Employee IDs (that's how it's populated as a result of the Westpac Employee ID being converted to uppercase).
         let westpac_employee_id_uppercase = args.wbc_employee_id.to_uppercase();
         // The URL for the HCM API endpoint.
+        let base = HCM_BASE_URL
+            .as_ref()
+            .map_err(|e| ErrorData::from(HcmError::MissingConfig(e.to_string())))?;
+        let api_ver = HCM_API_VERSION
+            .as_ref()
+            .map_err(|e| ErrorData::from(HcmError::MissingConfig(e.to_string())))?;
+
         let url = format!(
-            "{}/hcmRestApi/resources/{}/publicWorkers?q=assignments.WorkerNumber='{}'&onlyData=true&limit=1",
-            HCM_BASE_URL.as_deref().unwrap(), HCM_API_VERSION.as_deref().unwrap(), westpac_employee_id_uppercase
+            "{base}/hcmRestApi/resources/{api_ver}/publicWorkers?q=assignments.WorkerNumber='{westpac_employee_id_uppercase}'&onlyData=true&limit=1"
         );
 
         // Execute API call. The `?` operator will automatically propagate any `anyhow::Error`
@@ -265,9 +291,15 @@ impl OracleHCMMCPFactory {
         }
 
         // Construct the URL for fetching plan balances, filtering by PersonId
+        let base = HCM_BASE_URL
+            .as_ref()
+            .map_err(|e| ErrorData::from(HcmError::MissingConfig(e.to_string())))?;
+        let api_ver = HCM_API_VERSION
+            .as_ref()
+            .map_err(|e| ErrorData::from(HcmError::MissingConfig(e.to_string())))?;
         let url = format!(
             "{}/hcmRestApi/resources/{}/planBalances?onlyData=true&q=personId={};planDisplayStatusFlag=true",
-            HCM_BASE_URL.as_deref().unwrap(), HCM_API_VERSION.as_deref().unwrap(), args.hcm_person_id
+            base, api_ver, args.hcm_person_id
         );
 
         // Make the API call and get the JSON response
@@ -324,9 +356,14 @@ impl OracleHCMMCPFactory {
             })?;
 
         // Construct the URL for fetching absence types, filtering by PersonId
+        let base = HCM_BASE_URL
+            .as_ref()
+            .map_err(|e| ErrorData::from(HcmError::MissingConfig(e.to_string())))?;
+        let api_ver = HCM_API_VERSION
+            .as_ref()
+            .map_err(|e| ErrorData::from(HcmError::MissingConfig(e.to_string())))?;
         let url = format!(
-            "{}/hcmRestApi/resources/{}/absenceTypesLOV?onlyData=true&finder=findByWord;PersonId={}",
-            HCM_BASE_URL.as_deref().unwrap(), HCM_API_VERSION.as_deref().unwrap(), person_id
+            "{base}/hcmRestApi/resources/{api_ver}/absenceTypesLOV?onlyData=true&finder=findByWord;PersonId={person_id}"
         );
 
         // Make the API call and get the JSON response
@@ -370,9 +407,14 @@ impl OracleHCMMCPFactory {
         }): Parameters<AbsenceBalanceRequest>,
     ) -> Result<CallToolResult, ErrorData> {
         // Construct the URL for fetching plan balances, filtering by PersonId, PlanId, and balanceAsOfDate.
+        let base = HCM_BASE_URL
+            .as_ref()
+            .map_err(|e| ErrorData::from(HcmError::MissingConfig(e.to_string())))?;
+        let api_ver = HCM_API_VERSION
+            .as_ref()
+            .map_err(|e| ErrorData::from(HcmError::MissingConfig(e.to_string())))?;
         let url = format!(
-            "{}/hcmRestApi/resources/{}/absences/action/loadProjectedBalance",
-            HCM_BASE_URL.as_deref().unwrap(), HCM_API_VERSION.as_deref().unwrap(),
+            "{base}/hcmRestApi/resources/{api_ver}/absences/action/loadProjectedBalance"
         );
 
         // Mutate the balance_as_of_date to ensure it's in the correct format.
