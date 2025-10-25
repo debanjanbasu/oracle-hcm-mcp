@@ -1397,7 +1397,6 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
- "oauth2",
  "paste",
  "pin-project-lite",
  "rand 0.9.2",
@@ -1413,7 +1412,6 @@ dependencies = [
  "tokio-util",
  "tower-service",
  "tracing",
- "url",
  "uuid",
 ]
 

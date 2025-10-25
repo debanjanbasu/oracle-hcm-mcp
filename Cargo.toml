@@ -9,8 +9,8 @@ rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk.git", branch = 
     "server",
     "macros",
     "transport-streamable-http-server",
-    "auth",
-    "elicitation",
+    # "auth",
+    # "elicitation",
     "schemars",
     "reqwest",
 ] }

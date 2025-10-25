@@ -11,7 +11,7 @@ use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod mcp;
-use mcp::hcm::OracleHCMMCPFactory;
+use mcp::OracleHCMMCPFactory;
 
 const BIND_ADDRESS: &str = "0.0.0.0:8080";
 
