@@ -6,7 +6,7 @@ WORKDIR /app
 
 # Conditionally install custom CA certificate for build-time.
 # This must be the first step if building behind a corporate proxy.
-COPY cacerts.pem .
+COPY . .
 RUN if [ -f "cacerts.pem" ]; then \
     cp cacerts.pem /usr/local/share/ca-certificates/cacerts.crt && \
     update-ca-certificates; \
@@ -30,22 +30,7 @@ RUN case "${TARGETARCH}" in \
 # Set RUSTFLAGS for a static binary. This applies to all subsequent cargo commands.
 ENV RUSTFLAGS='-C target-feature=+crt-static --cfg reqwest_unstable'
 
-# Cache dependencies. This layer is rebuilt only when Cargo.toml, Cargo.lock or .cargo/config.toml change.
-COPY Cargo.toml Cargo.lock ./
-# Copy the .cargo directory if it exists in the build context.
-# This is necessary if custom Cargo configurations (e.g., config.toml) are used.
-COPY .cargo .cargo/
-RUN \
-    --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/app/target \
-    . /env.sh && \
-    set -eux; \
-    mkdir -p src; \
-    echo "fn main() {}" > src/main.rs; \
-    cargo build --release --target "$RUST_TARGET"
-
-# Build the application.
-COPY src ./src
+# Cache dependencies and build the application
 RUN \
     --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
