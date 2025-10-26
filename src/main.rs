@@ -18,8 +18,8 @@ const BIND_ADDRESS: &str = "0.0.0.0:8080";
 #[tokio::main]
 async fn main() -> Result<()> {
     // Load environment variables from .env file for configuration
-    // Continues even if .env doesn't exist (ok() handles the Result)
-    dotenv().ok();
+    // The program is pretty useless without the correct .env settings
+    dotenv()?;
 
     // Initialize structured logging with tracing
     // Uses RUST_LOG env var if set, defaults to "debug" level
