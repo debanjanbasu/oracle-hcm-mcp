@@ -9,8 +9,6 @@ rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk.git", branch = 
     "server",
     "macros",
     "transport-streamable-http-server",
-    # "auth",
-    # "elicitation",
     "schemars",
     "reqwest",
 ] }
@@ -35,7 +33,6 @@ reqwest-tracing = "0.5"
 schemars = "1"
 dotenv = "0.15"
 thiserror = "2"
-oauth2 = { version = "5.0", default-features = false, features = ["rustls-tls"] }
 chrono = "0.4"
 http = "1.3"
 
