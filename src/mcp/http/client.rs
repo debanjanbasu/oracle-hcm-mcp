@@ -14,7 +14,7 @@ use reqwest_middleware::{ClientBuilder, Result as MiddlewareResult};
 use reqwest_tracing::{
     ReqwestOtelSpanBackend, TracingMiddleware, default_on_request_end, reqwest_otel_span,
 };
-use tracing::Span;
+use tracing::{Span, error, trace};
 
 use crate::mcp::error::HcmError;
 
@@ -158,6 +158,23 @@ pub async fn hcm_api_call(
     }
 
     let response = request_builder.send().await?;
-    let json_value = response.json().await?;
-    Ok(json_value)
+    let status = response.status();
+    
+    if !status.is_success() {
+        // Handle error responses with better error extraction
+        let error_text = response.text().await
+            .unwrap_or_else(|e| format!("Unable to read error response body: {e}"));
+        
+        error!("HCM API request failed with status {}: {}", status, error_text);
+        return Err(HcmError::Internal(anyhow!("HTTP {status}: {error_text}")));
+    }
+    
+    // For successful responses, parse JSON with improved error handling
+    let json_response = response.json::<serde_json::Value>().await.map_err(|e| {
+        error!("HCM API failed to parse successful response as JSON: {}", e);
+        HcmError::Internal(anyhow!("JSON parsing failed: {e}"))
+    })?;
+    
+    trace!("HCM API response (JSON): {:?}", json_response);
+    Ok(json_response)
 }
