@@ -51,7 +51,7 @@ Building the project for production:
        <your-dockerhub-username>/oracle-hcm-mcp:latest
      ```
      ```powershell
-     docker run --name oracle-hcm-mcp -p 8080:8080 --env-file .env -e 'RUST_LOG=trace' --mount "type=bind,source=$($PWD.Path)\cacerts.pem,target=/app/cacerts.pem,readonly" -e 'SSL_CERT_FILE=/app/cacerts.pem' debanjanbasu/oracle-hcm-mcp:latest
+     docker run --name oracle-hcm-mcp -p 8080:8080 --env-file .env -e 'RUST_LOG=trace' --mount "type=bind,source=$($PWD.Path)\cacerts.pem,target=/app/cacerts.pem,readonly" -e 'SSL_CERT_FILE=/app/cacerts.pem' <your-dockerhub-username>/oracle-hcm-mcp:latest
      ```
      Using `$(pwd)/cacerts.pem` ensures an absolute path is provided, preventing issues with the current working directory. This will make your custom CA certificate available to the application for SSL/TLS connections.
 3. Run the Docker container (trace mode turned on for verbose logging):
