@@ -10,12 +10,11 @@
 
 use crate::mcp::{
     error::HcmError,
-    http::{hcm_api_call, HCM_BASE_URL, HCM_API_VERSION},
+    http::{hcm_api_call, Body, Method},
     tools::absence_balance::AbsenceBalanceRequest,
 };
 use anyhow::Result;
 use chrono::{NaiveDate, Local};
-use crate::mcp::http::{Body, Method};
 use rmcp::{
     handler::server::wrapper::Parameters,
     model::{CallToolResult, ErrorCode},
@@ -32,17 +31,6 @@ pub async fn get_projected_balance(
         balance_as_of_date,
     }): Parameters<AbsenceBalanceRequest>,
 ) -> Result<CallToolResult, ErrorData> {
-    let base = HCM_BASE_URL
-        .as_ref()
-        .map_err(|e| ErrorData::from(HcmError::MissingConfig(e.to_string())))?;
-    let api_ver = HCM_API_VERSION
-        .as_ref()
-        .map_err(|e| ErrorData::from(HcmError::MissingConfig(e.to_string())))?;
-
-    let url = format!(
-        "{base}/hcmRestApi/resources/{api_ver}/absences/action/loadProjectedBalance"
-    );
-
     let formatted_balance_as_of_date = balance_as_of_date
         .as_ref()
         .and_then(|d| NaiveDate::parse_from_str(d, "%d-%m-%Y").ok())
@@ -68,7 +56,7 @@ pub async fn get_projected_balance(
     let body = Body::from(serde_json::to_string(&request_body).map_err(HcmError::from)?);
 
     let json = hcm_api_call(
-        &url,
+        "/absences/action/loadProjectedBalance",
         Method::POST,
         Some(body),
         true,
@@ -78,16 +66,13 @@ pub async fn get_projected_balance(
 
     let projected_balance = json["result"]["formattedProjectedBalance"]
         .as_str()
-        .map_or_else(
-            || {
-                Err(ErrorData::new(
-                    ErrorCode::INTERNAL_ERROR,
-                    "Failed to parse projected balance from response.".to_string(),
-                    None,
-                ))
-            },
-            |balance| Ok(balance.to_string()),
-        )?;
+        .ok_or_else(|| {
+            ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                "Failed to parse projected balance from response.".to_string(),
+                None,
+            )
+        })?;
 
     Ok(CallToolResult::structured(json!({
         "absence_type_id": absence_type_id,

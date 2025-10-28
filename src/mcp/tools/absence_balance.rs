@@ -9,7 +9,7 @@
 //!
 //! Balances are returned in hours and include carry-over status.
 
-use crate::mcp::{error::HcmError, http::{hcm_api_call, HCM_BASE_URL, HCM_API_VERSION, Method}};
+use crate::mcp::http::{hcm_api_call, Method};
 use anyhow::Result;
 use chrono::NaiveDate;
 use rmcp::{
@@ -53,23 +53,17 @@ pub async fn get_all_absence_balances_for_employee_hcm_person_id(
         ));
     }
 
-    let base = HCM_BASE_URL
-        .as_ref()
-        .map_err(|e| ErrorData::from(HcmError::MissingConfig(e.to_string())))?;
-    let api_ver = HCM_API_VERSION
-        .as_ref()
-        .map_err(|e| ErrorData::from(HcmError::MissingConfig(e.to_string())))?;
-    
-    let url = format!(
-        "{base}/hcmRestApi/resources/{api_ver}/planBalances?onlyData=true&q=personId={};planDisplayStatusFlag=true",
+    let path = format!(
+        "/planBalances?onlyData=true&q=personId={};planDisplayStatusFlag=true",
         args.hcm_person_id
     );
 
-    let json = hcm_api_call(&url, Method::GET, None, false, None)
+    let json = hcm_api_call(&path, Method::GET, None, false, None)
         .await?;
 
-    let absence_balances: Vec<serde_json::Value> =
-        json["items"].as_array().map_or_else(Vec::new, |arr| {
+    let absence_balances = json["items"]
+        .as_array()
+        .map(|arr| {
             arr.iter()
                 .filter_map(|item| {
                     let name = item["planName"].as_str()?;
@@ -89,8 +83,9 @@ pub async fn get_all_absence_balances_for_employee_hcm_person_id(
                         "balanceCalculationDate": balance_calc_date,
                     }))
                 })
-                .collect()
-        });
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
 
     Ok(CallToolResult::structured(json!({
         "absence_balances": absence_balances,

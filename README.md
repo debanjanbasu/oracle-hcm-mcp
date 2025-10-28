@@ -48,7 +48,7 @@ Building the project for production:
        -e RUST_LOG="trace" \
        -v "$(pwd)/cacerts.pem:/app/cacerts.pem" \
        -e SSL_CERT_FILE="/app/cacerts.pem" \
-       debanjanbasu/oracle-hcm-mcp:latest
+       <your-dockerhub-username>/oracle-hcm-mcp:latest
      ```
      ```powershell
      docker run --name oracle-hcm-mcp -p 8080:8080 --env-file .env -e 'RUST_LOG=trace' --mount "type=bind,source=$($PWD.Path)\cacerts.pem,target=/app/cacerts.pem,readonly" -e 'SSL_CERT_FILE=/app/cacerts.pem' debanjanbasu/oracle-hcm-mcp:latest

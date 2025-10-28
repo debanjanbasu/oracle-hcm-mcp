@@ -8,11 +8,10 @@
 
 use crate::mcp::{
     error::HcmError,
-    http::{hcm_api_call, HCM_BASE_URL, HCM_API_VERSION},
+    http::{hcm_api_call, Method},
     tools::person_id::Employee,
 };
 use anyhow::Result;
-use reqwest::Method;
 use rmcp::{
     handler::server::wrapper::Parameters,
     model::CallToolResult,
@@ -30,22 +29,16 @@ pub async fn get_absence_types_for_employee_hcm_person_id(
             HcmError::InvalidParams("HCM PersonId is required and cannot be empty.".to_string())
         })?;
 
-    let base = HCM_BASE_URL
-        .as_ref()
-        .map_err(|e| ErrorData::from(HcmError::MissingConfig(e.to_string())))?;
-    let api_ver = HCM_API_VERSION
-        .as_ref()
-        .map_err(|e| ErrorData::from(HcmError::MissingConfig(e.to_string())))?;
-
-    let url = format!(
-        "{base}/hcmRestApi/resources/{api_ver}/absenceTypesLOV?onlyData=true&finder=findByWord;PersonId={person_id}"
+    let path = format!(
+        "/absenceTypesLOV?onlyData=true&finder=findByWord;PersonId={person_id}"
     );
 
-    let json = hcm_api_call(&url, Method::GET, None, true, None)
+    let json = hcm_api_call(&path, Method::GET, None, true, None)
         .await?;
 
-    let absence_types: Vec<serde_json::Value> =
-        json["items"].as_array().map_or_else(Vec::new, |arr| {
+    let absence_types = json["items"]
+        .as_array()
+        .map(|arr| {
             arr.iter()
                 .filter_map(|item| {
                     let id = item["AbsenceTypeId"].as_str()?;
@@ -57,8 +50,9 @@ pub async fn get_absence_types_for_employee_hcm_person_id(
                         "AbsenceTypeName": name
                     }))
                 })
-                .collect()
-        });
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
 
     Ok(CallToolResult::structured(json!({ "absence_types": absence_types })))
 }

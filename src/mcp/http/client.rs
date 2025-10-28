@@ -1,53 +1,130 @@
 //! HTTP client configuration and shared API call functionality for Oracle HCM.
 //!
-//! This module provides:
-//! - Environment-based configuration (URLs, credentials, versions)
-//! - Shared HTTP client with proper timeout and authentication
-//! - OpenTelemetry integration for request tracing
-//! - Common API call function used by all tools
+//! This module provides the core HTTP infrastructure for communicating with Oracle HCM's REST API:
+//! - **Configuration Management**: Environment-based setup with sensible defaults
+//! - **Connection Pooling**: Shared HTTP client for optimal performance
+//! - **Request Tracing**: OpenTelemetry integration for observability
+//! - **Error Handling**: Comprehensive error types and recovery
+//! - **Authentication**: Basic auth with credential management
+//!
+//! # Configuration
+//! All configuration is loaded from environment variables at startup:
+//! - `HCM_BASE_URL` (required): Base URL for your Oracle HCM instance
+//! - `HCM_API_VERSION` (optional): API version, defaults to "11.13.18.05"
+//! - `HCM_USERNAME` (optional): Username, defaults to "`WBC_HR_AGENT`"
+//! - `HCM_PASSWORD` (required): Password for authentication
+//! - `REST_FRAMEWORK_VERSION` (optional): Framework version, defaults to "9"
+//!
+//! # Performance
+//! The module uses a singleton HTTP client (via `LazyLock`) that is initialized once
+//! and reused across all requests. This provides:
+//! - Connection pooling and reuse
+//! - Reduced memory allocations
+//! - Lower latency for subsequent requests
 
 use std::{env, sync::LazyLock, time::Duration};
 use anyhow::{anyhow, Result};
 use http::Extensions;
 use reqwest::{Body, Method, Request, Response};
-use reqwest_middleware::{ClientBuilder, Result as MiddlewareResult};
+use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, Result as MiddlewareResult};
 use reqwest_tracing::{
     ReqwestOtelSpanBackend, TracingMiddleware, default_on_request_end, reqwest_otel_span,
 };
-use tracing::{Span, error, trace};
+use tracing::{Span, error, info, trace};
 
 use crate::mcp::error::HcmError;
 
-// Load configuration from environment variables
-pub static HCM_BASE_URL: LazyLock<Result<String>> = LazyLock::new(|| {
-    env::var("HCM_BASE_URL").map_err(|e| anyhow!("HCM_BASE_URL must be set: {e}"))
+/// Helper function to load and sanitize environment variables.
+/// Removes surrounding quotes that may be added by shell or .env files.
+fn load_env_var(key: &str) -> Result<String> {
+    env::var(key)
+        .map(|s| s.trim_matches('"').to_string())
+        .map_err(|e| anyhow!("{key} must be set: {e}"))
+}
+
+/// Helper function to load optional environment variables with a default value.
+/// Removes surrounding quotes that may be added by shell or .env files.
+fn load_env_var_or(key: &str, default: &str) -> String {
+    env::var(key)
+        .unwrap_or_else(|_| default.to_string())
+        .trim_matches('"')
+        .to_string()
+}
+
+// ============================================================================
+// Configuration - Loaded once at startup
+// ============================================================================
+
+/// Base URL for the Oracle HCM instance (e.g., "<https://your-instance.oraclecloud.com>")
+/// This is required and must be set via environment variable.
+pub static HCM_BASE_URL: LazyLock<Result<String>> = 
+    LazyLock::new(|| load_env_var("HCM_BASE_URL"));
+
+/// Oracle HCM API version used in request paths.
+/// Defaults to "11.13.18.05" if not specified.
+pub static HCM_API_VERSION: LazyLock<Result<String>> = 
+    LazyLock::new(|| Ok(load_env_var_or("HCM_API_VERSION", "11.13.18.05")));
+
+/// REST Framework Version header value.
+/// Required by most HCM API endpoints. Defaults to "9" if not specified.
+pub static REST_FRAMEWORK_VERSION: LazyLock<Result<String>> = 
+    LazyLock::new(|| Ok(load_env_var_or("REST_FRAMEWORK_VERSION", "9")));
+
+/// Username for Basic Authentication with Oracle HCM.
+/// Defaults to "`WBC_HR_AGENT`" if not specified.
+pub static HCM_USERNAME: LazyLock<Result<String>> = 
+    LazyLock::new(|| Ok(load_env_var_or("HCM_USERNAME", "WBC_HR_AGENT")));
+
+/// Password for Basic Authentication with Oracle HCM.
+/// This is required and must be set via environment variable.
+pub static HCM_PASSWORD: LazyLock<Result<String>> = 
+    LazyLock::new(|| load_env_var("HCM_PASSWORD"));
+
+// ============================================================================
+// HTTP Client - Singleton with connection pooling
+// ============================================================================
+
+/// Shared HTTP client with middleware for tracing.
+/// Initialized lazily on first use and reused for all subsequent requests.
+/// Uses a 30-second timeout by default.
+///
+/// Returns a `Result` to handle initialization failures gracefully
+/// (e.g., TLS configuration issues).
+static HTTP_CLIENT: LazyLock<Result<ClientWithMiddleware, String>> = LazyLock::new(|| {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+    
+    Ok(ClientBuilder::new(client)
+        .with(TracingMiddleware::<CustomTracing>::new())
+        .build())
 });
 
-pub static HCM_API_VERSION: LazyLock<Result<String>> =
-    LazyLock::new(|| Ok(env::var("HCM_API_VERSION").unwrap_or_else(|_| "11.13.18.05".to_string())));
+// ============================================================================
+// Request Tracing - OpenTelemetry integration
+// ============================================================================
 
-pub static REST_FRAMEWORK_VERSION: LazyLock<Result<String>> =
-    LazyLock::new(|| Ok(env::var("REST_FRAMEWORK_VERSION").unwrap_or_else(|_| "9".to_string())));
-
-pub static HCM_USERNAME: LazyLock<Result<String>> =
-    LazyLock::new(|| Ok(env::var("HCM_USERNAME").unwrap_or_else(|_| "WBC_HR_AGENT".to_string())));
-
-pub static HCM_PASSWORD: LazyLock<Result<String>> = LazyLock::new(|| {
-    env::var("HCM_PASSWORD").map_err(|e| anyhow!("HCM_PASSWORD must be set: {e}"))
-});
-
-/// Custom tracing implementation for Oracle HCM API requests
+/// Custom tracing backend for Oracle HCM API requests.
 /// 
-/// This backend integrates with OpenTelemetry to provide:
-/// - Request timing and latency tracking
-/// - Headers and body content (sanitized)
-/// - Error states and outcomes
-/// - Request/response correlation
+/// Integrates with OpenTelemetry to provide comprehensive observability:
+/// - **Request timing**: Measures latency for each API call
+/// - **Request details**: Logs method, URL, headers, and body
+/// - **Response correlation**: Links requests with their responses
+/// - **Error tracking**: Captures failure states and status codes
+///
+/// This enables monitoring, debugging, and performance analysis in production.
 struct CustomTracing;
 
 impl ReqwestOtelSpanBackend for CustomTracing {
-    /// Start a new trace span for an outgoing request
-    /// Creates spans with request details but sanitizes sensitive data
+    /// Creates a new tracing span when an HTTP request starts.
+    /// 
+    /// The span captures:
+    /// - Request method and URL
+    /// - Request headers (for debugging auth/content-type issues)
+    /// - Request body (if available)
+    ///
+    /// Note: Sensitive data like passwords should be filtered by the tracing layer.
     fn on_request_start(req: &Request, _extension: &mut Extensions) -> Span {
         reqwest_otel_span!(
             name = "hcm-api-request",
@@ -57,8 +134,14 @@ impl ReqwestOtelSpanBackend for CustomTracing {
         )
     }
 
-    /// Close the trace span and record the outcome
-    /// Uses default behavior which adds response status and timing
+    /// Completes the tracing span when the HTTP request finishes.
+    /// 
+    /// Records:
+    /// - Response status code
+    /// - Request duration
+    /// - Success or failure outcome
+    ///
+    /// Uses the default implementation which handles standard HTTP metrics.
     fn on_request_end(
         span: &Span,
         outcome: &MiddlewareResult<Response>,
@@ -68,68 +151,125 @@ impl ReqwestOtelSpanBackend for CustomTracing {
     }
 }
 
-/// Makes an authenticated HTTP request to the Oracle HCM REST API with tracing and error handling.
+// ============================================================================
+// HTTP API Call - Main entry point for all HCM API requests
+// ============================================================================
+
+/// Makes an authenticated HTTP request to the Oracle HCM REST API.
 /// 
-/// Creates a traced, authenticated request with proper timeouts and headers for Oracle HCM.
-/// Handles common failure cases and provides detailed error information.
-///
-/// # Configuration
-/// Uses environment variables for base configuration:
-/// - `HCM_USERNAME` - API authentication username
-/// - `HCM_PASSWORD` - API authentication password
-/// - `REST_FRAMEWORK_VERSION` - Required API compatibility version
-///
-/// # Request Details
-/// * Headers automatically added:
-///   - Basic Auth from credentials
-///   - Content-Type for POST requests
-///   - REST-Framework-Version when enabled
-/// * Default timeout: 30 seconds
-/// * Methods supported: GET, POST
+/// This is the primary function used by all tools to communicate with Oracle HCM.
+/// It handles authentication, headers, timeouts, tracing, and error handling automatically.
 ///
 /// # Arguments
-/// * `url` - Complete URL for the HCM API endpoint
-/// * `method` - HTTP method (GET/POST only)
-/// * `body` - Optional request body for POST requests
-/// * `enable_framework_version` - Add REST-Framework-Version header
-///   * Required for most endpoints except those using Effective-Of
-/// * `set_timeout` - Custom timeout (some operations need longer)
+/// * `path` - API endpoint path relative to the base URL
+///   - Example: `"/publicWorkers?q=assignments.WorkerNumber='M061230'"`
+///   - Should include query parameters if needed
+/// * `method` - HTTP method to use (only `GET` and `POST` are supported)
+/// * `body` - Request body for POST requests (use `None` for GET)
+/// * `enable_framework_version` - Whether to add the `REST-Framework-Version` header
+///   - Set to `true` for most endpoints
+///   - Set to `false` for endpoints that use `Effective-Of` header instead
+/// * `set_timeout` - Custom timeout override (use `None` for default 30s timeout)
+///   - Some operations (like projected balance calculations) may need longer timeouts
 ///
 /// # Returns
-/// * `Ok(Value)` - Parsed JSON response
-/// * `Err(HcmError)` - Structured error information:
-///   * `InvalidParams` - Bad method/request
-///   * `MissingConfig` - Environment not set
-///   * `Http` - Network/API failures
-///   * `Serialization` - JSON parse errors
+/// * `Ok(Value)` - Parsed JSON response from the API
+/// * `Err(HcmError)` - Detailed error information:
+///   - `InvalidParams`: Bad request (e.g., unsupported HTTP method)
+///   - `MissingConfig`: Environment variable not set
+///   - `Http`: Network error or API returned error status
+///   - `Serialization`: Failed to parse JSON response
 ///
 /// # Example
 /// ```no_run
-/// let response = hcm_api_call(
-///     "https://hcm-api.example.com/endpoint",
+/// use reqwest::Method;
+/// use std::time::Duration;
+/// 
+/// // Simple GET request with default timeout
+/// let workers = hcm_api_call(
+///     "/publicWorkers?onlyData=true&limit=10",
 ///     Method::GET,
 ///     None,
+///     true,  // Include REST-Framework-Version header
+///     None   // Use default 30s timeout
+/// ).await?;
+///
+/// // POST request with custom timeout
+/// let body = Body::from(r#"{"entry": {"personId": "123"}}"#);
+/// let result = hcm_api_call(
+///     "/absences/action/loadProjectedBalance",
+///     Method::POST,
+///     Some(body),
 ///     true,
-///     None
+///     Some(Duration::from_secs(60))  // 60s timeout for slow operation
 /// ).await?;
 /// ```
+///
+/// # URL Construction
+/// The full URL is built as:
+/// ```text
+/// {HCM_BASE_URL}/hcmRestApi/resources/{HCM_API_VERSION}{path}
+/// ```
+/// For example, with:
+/// - `HCM_BASE_URL=https://instance.oraclecloud.com`
+/// - `HCM_API_VERSION=11.13.18.05`
+/// - `path=/publicWorkers?onlyData=true`
+/// 
+/// The final URL will be:
+/// ```text
+/// https://instance.oraclecloud.com/hcmRestApi/resources/11.13.18.05/publicWorkers?onlyData=true
+/// ```
+///
+/// # Authentication
+/// Automatically adds HTTP Basic Authentication using:
+/// - Username from `HCM_USERNAME` environment variable
+/// - Password from `HCM_PASSWORD` environment variable
+///
+/// # Logging
+/// Logs at different levels:
+/// - `INFO`: Request/response summary with URL and status
+/// - `TRACE`: Full JSON response body for debugging
+/// - `ERROR`: Error details when requests fail
 pub async fn hcm_api_call(
-    url: &str,
+    path: &str,
     method: Method,
     body: Option<Body>,
     enable_framework_version: bool,
     set_timeout: Option<Duration>,
 ) -> Result<serde_json::Value, HcmError> {
-    let mut client_builder = reqwest::Client::builder();
+    // Load configuration from static globals (loaded once at startup)
+    let base = HCM_BASE_URL
+        .as_ref()
+        .map_err(|e| HcmError::MissingConfig(e.to_string()))?;
+    let api_ver = HCM_API_VERSION
+        .as_ref()
+        .map_err(|e| HcmError::MissingConfig(e.to_string()))?;
 
-    if let Some(timeout) = set_timeout {
-        client_builder = client_builder.timeout(timeout);
-    }
+    // Construct the full API URL
+    let url = format!("{base}/hcmRestApi/resources/{api_ver}{path}");
+    
+    info!("HCM API request: {} {}", method, url);
+    
+    // Use shared client for performance, or create custom client if timeout override requested
+    let client = if let Some(timeout) = set_timeout {
+        // Custom timeout requested - build a new client
+        let custom_client = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|e| HcmError::Internal(anyhow!("Failed to build HTTP client with custom timeout: {e}")))?;
+        
+        ClientBuilder::new(custom_client)
+            .with(TracingMiddleware::<CustomTracing>::new())
+            .build()
+    } else {
+        // Use shared client for optimal performance (connection pooling)
+        HTTP_CLIENT
+            .as_ref()
+            .map_err(|e| HcmError::Internal(anyhow!("HTTP client initialization failed: {e}")))?
+            .clone()
+    };
 
-    let client = ClientBuilder::new(client_builder.build()?)
-        .with(TracingMiddleware::<CustomTracing>::new())
-        .build();
-
+    // Load authentication credentials
     let username = HCM_USERNAME
         .as_ref()
         .map_err(|e| HcmError::MissingConfig(e.to_string()))?;
@@ -137,14 +277,17 @@ pub async fn hcm_api_call(
         .as_ref()
         .map_err(|e| HcmError::MissingConfig(e.to_string()))?;
 
+    // Build the HTTP request based on method
     let mut request_builder = match method {
-        Method::GET => client.get(url),
-        Method::POST => client.post(url).body(body.unwrap_or_default()),
-        _ => return Err(HcmError::InvalidParams("Unsupported HTTP method".to_string())),
+        Method::GET => client.get(&url),
+        Method::POST => client.post(&url).body(body.unwrap_or_default()),
+        _ => return Err(HcmError::InvalidParams("Only GET and POST methods are supported".to_string())),
     };
 
-    request_builder = request_builder.basic_auth(username.as_str(), Some(password.as_str()));
+    // Add HTTP Basic Authentication
+    request_builder = request_builder.basic_auth(username, Some(password));
 
+    // Add REST-Framework-Version header if requested (required by most endpoints)
     if enable_framework_version {
         let rf_version = REST_FRAMEWORK_VERSION
             .as_ref()
@@ -152,16 +295,20 @@ pub async fn hcm_api_call(
         request_builder = request_builder.header("REST-Framework-Version", rf_version.as_str());
     }
 
+    // Add Content-Type header for POST requests (Oracle ADF format)
     if method == Method::POST {
         request_builder =
             request_builder.header("Content-Type", "application/vnd.oracle.adf.action+json");
     }
 
+    // Execute the request
     let response = request_builder.send().await?;
     let status = response.status();
     
+    info!("HCM API response: {} {} - Status: {}", method, url, status);
+    
+    // Handle error responses
     if !status.is_success() {
-        // Handle error responses with better error extraction
         let error_text = response.text().await
             .unwrap_or_else(|e| format!("Unable to read error response body: {e}"));
         
@@ -169,7 +316,7 @@ pub async fn hcm_api_call(
         return Err(HcmError::Internal(anyhow!("HTTP {status}: {error_text}")));
     }
     
-    // For successful responses, parse JSON with improved error handling
+    // Parse successful JSON response
     let json_response = response.json::<serde_json::Value>().await.map_err(|e| {
         error!("HCM API failed to parse successful response as JSON: {}", e);
         HcmError::Internal(anyhow!("JSON parsing failed: {e}"))
