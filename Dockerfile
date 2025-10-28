@@ -12,8 +12,8 @@ RUN if [ -f "cacerts.pem" ]; then \
     update-ca-certificates; \
     fi
 
-# Install build dependencies for static linking.
-RUN apk add --no-cache musl-dev
+# Install build dependencies for static linking and UPX for binary compression.
+RUN apk add --no-cache musl-dev upx
 
 # Declare build arguments and set RUST_TARGET environment variable for subsequent commands.
 ARG TARGETARCH
@@ -27,8 +27,11 @@ RUN case "${TARGETARCH}" in \
     . /env.sh && \
     rustup target add "${RUST_TARGET}"
 
-# Set RUSTFLAGS for a static binary. This applies to all subsequent cargo commands.
-ENV RUSTFLAGS='-C target-feature=+crt-static --cfg reqwest_unstable'
+# Set RUSTFLAGS for a static binary with size optimization.
+# -C target-feature=+crt-static: Create fully static binary
+# -C link-arg=-s: Strip binary during linking (smaller final binary)
+# -–cfg reqwest_unstable: Enable unstable features in reqwest crate
+ENV RUSTFLAGS='-C target-feature=+crt-static -C link-arg=-s --cfg reqwest_unstable'
 
 # Cache dependencies and build the application
 RUN \
@@ -37,7 +40,9 @@ RUN \
     . /env.sh && \
     set -eux; \
     cargo build --release --target "$RUST_TARGET" && \
-    cp "target/$RUST_TARGET/release/oracle-hcm-mcp" /app/oracle-hcm-mcp
+    cp "target/$RUST_TARGET/release/oracle-hcm-mcp" /app/oracle-hcm-mcp && \
+    # Compress the binary with UPX using best compression and LZMA algorithm
+    upx --best --lzma /app/oracle-hcm-mcp
 
 # --- Final Stage ---
 # Use a scratch image for a minimal and secure runtime.
