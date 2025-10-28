@@ -35,10 +35,10 @@ use tracing::{Span, error, info, trace};
 use crate::mcp::error::HcmError;
 
 /// Helper function to load and sanitize environment variables.
-/// Removes surrounding quotes that may be added by shell or .env files.
+/// Removes surrounding quotes (both single and double) that may be added by shell or .env files.
 fn load_env_var(key: &str) -> Result<String> {
     env::var(key)
-        .map(|s| s.trim_matches('"').to_string())
+        .map(|s| s.trim_matches(|c| c == '"' || c == '\'').to_string())
         .map_err(|e| anyhow!("{key} must be set: {e}"))
 }
 
