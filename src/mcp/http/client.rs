@@ -62,18 +62,18 @@ pub static HCM_BASE_URL: LazyLock<Result<String>> =
 
 /// Oracle HCM API version used in request paths.
 /// Defaults to "11.13.18.05" if not specified.
-pub static HCM_API_VERSION: LazyLock<Result<String>> = 
-    LazyLock::new(|| Ok(load_env_var_or("HCM_API_VERSION", "11.13.18.05")));
+pub static HCM_API_VERSION: LazyLock<String> = 
+    LazyLock::new(|| load_env_var_or("HCM_API_VERSION", "11.13.18.05"));
 
 /// REST Framework Version header value.
 /// Required by most HCM API endpoints. Defaults to "9" if not specified.
-pub static REST_FRAMEWORK_VERSION: LazyLock<Result<String>> = 
-    LazyLock::new(|| Ok(load_env_var_or("REST_FRAMEWORK_VERSION", "9")));
+pub static REST_FRAMEWORK_VERSION: LazyLock<String> = 
+    LazyLock::new(|| load_env_var_or("REST_FRAMEWORK_VERSION", "9"));
 
 /// Username for Basic Authentication with Oracle HCM.
 /// Defaults to "`WBC_HR_AGENT`" if not specified.
-pub static HCM_USERNAME: LazyLock<Result<String>> = 
-    LazyLock::new(|| Ok(load_env_var_or("HCM_USERNAME", "WBC_HR_AGENT")));
+pub static HCM_USERNAME: LazyLock<String> = 
+    LazyLock::new(|| load_env_var_or("HCM_USERNAME", "WBC_HR_AGENT"));
 
 /// Password for Basic Authentication with Oracle HCM.
 /// This is required and must be set via environment variable.
@@ -241,38 +241,21 @@ pub async fn hcm_api_call(
     let base = HCM_BASE_URL
         .as_ref()
         .map_err(|e| HcmError::MissingConfig(e.to_string()))?;
-    let api_ver = HCM_API_VERSION
-        .as_ref()
-        .map_err(|e| HcmError::MissingConfig(e.to_string()))?;
+    let api_ver = HCM_API_VERSION.as_str();
 
     // Construct the full API URL
     let url = format!("{base}/hcmRestApi/resources/{api_ver}{path}");
     
     info!("HCM API request: {} {}", method, url);
     
-    // Use shared client for performance, or create custom client if timeout override requested
-    let client = if let Some(timeout) = set_timeout {
-        // Custom timeout requested - build a new client
-        let custom_client = reqwest::Client::builder()
-            .timeout(timeout)
-            .build()
-            .map_err(|e| HcmError::Internal(anyhow!("Failed to build HTTP client with custom timeout: {e}")))?;
-        
-        ClientBuilder::new(custom_client)
-            .with(TracingMiddleware::<CustomTracing>::new())
-            .build()
-    } else {
-        // Use shared client for optimal performance (connection pooling)
-        HTTP_CLIENT
-            .as_ref()
-            .map_err(|e| HcmError::Internal(anyhow!("HTTP client initialization failed: {e}")))?
-            .clone()
-    };
+    // Use shared client for optimal performance (connection pooling)
+    let client = HTTP_CLIENT
+        .as_ref()
+        .map_err(|e| HcmError::Internal(anyhow!("HTTP client initialization failed: {e}")))?
+        .clone();
 
     // Load authentication credentials
-    let username = HCM_USERNAME
-        .as_ref()
-        .map_err(|e| HcmError::MissingConfig(e.to_string()))?;
+    let username = HCM_USERNAME.as_str();
     let password = HCM_PASSWORD
         .as_ref()
         .map_err(|e| HcmError::MissingConfig(e.to_string()))?;
@@ -283,16 +266,19 @@ pub async fn hcm_api_call(
         Method::POST => client.post(&url).body(body.unwrap_or_default()),
         _ => return Err(HcmError::InvalidParams("Only GET and POST methods are supported".to_string())),
     };
+    
+    // Apply custom timeout if specified
+    if let Some(timeout) = set_timeout {
+        request_builder = request_builder.timeout(timeout);
+    }
 
     // Add HTTP Basic Authentication
     request_builder = request_builder.basic_auth(username, Some(password));
 
     // Add REST-Framework-Version header if requested (required by most endpoints)
     if enable_framework_version {
-        let rf_version = REST_FRAMEWORK_VERSION
-            .as_ref()
-            .map_err(|e| HcmError::MissingConfig(e.to_string()))?;
-        request_builder = request_builder.header("REST-Framework-Version", rf_version.as_str());
+        let rf_version = REST_FRAMEWORK_VERSION.as_str();
+        request_builder = request_builder.header("REST-Framework-Version", rf_version);
     }
 
     // Add Content-Type header for POST requests (Oracle ADF format)

@@ -8,10 +8,7 @@ mod client;
 // Re-export client's public API
 pub use client::{
     hcm_api_call,
-    HCM_API_VERSION,
     HCM_BASE_URL,
-    REST_FRAMEWORK_VERSION,
-    HCM_USERNAME,
     HCM_PASSWORD,
 };
 

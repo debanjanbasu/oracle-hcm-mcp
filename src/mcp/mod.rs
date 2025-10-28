@@ -34,9 +34,6 @@ use tracing::info;
 // Use re-exported items from http module
 use crate::mcp::http::{
     HCM_BASE_URL,
-    HCM_API_VERSION,
-    REST_FRAMEWORK_VERSION,
-    HCM_USERNAME,
     HCM_PASSWORD,
 };
 
@@ -56,24 +53,14 @@ pub struct OracleHCMMCPFactory {
 #[tool_router]
 impl OracleHCMMCPFactory {
     pub fn new() -> Result<Self> {
-        // Eagerly evaluate all LazyLock configurations to ensure they're valid
+        // Eagerly evaluate required LazyLock configurations to ensure they're valid
         // This fails fast if any required config is missing or invalid
         
         // Required: Base URL for Oracle HCM API
         let _ = HCM_BASE_URL.as_ref()
             .map_err(|e| anyhow!("Failed to load HCM_BASE_URL: {e}"))?;
         
-        // API version - critical for request compatibility
-        let _ = HCM_API_VERSION.as_ref()
-            .map_err(|e| anyhow!("Failed to load HCM_API_VERSION: {e}"))?;
-        
-        // Required header for most endpoints
-        let _ = REST_FRAMEWORK_VERSION.as_ref()
-            .map_err(|e| anyhow!("Failed to load REST_FRAMEWORK_VERSION: {e}"))?;
-        
-        // Authentication credentials
-        let _ = HCM_USERNAME.as_ref()
-            .map_err(|e| anyhow!("Failed to load HCM_USERNAME: {e}"))?;
+        // Required: Password for authentication
         let _ = HCM_PASSWORD.as_ref()
             .map_err(|e| anyhow!("Failed to load HCM_PASSWORD: {e}"))?;
 

@@ -31,6 +31,14 @@ pub async fn get_projected_balance(
         balance_as_of_date,
     }): Parameters<AbsenceBalanceRequest>,
 ) -> Result<CallToolResult, ErrorData> {
+    if hcm_person_id.is_empty() {
+        return Err(ErrorData::new(
+            ErrorCode::INVALID_PARAMS,
+            "HCM PersonId cannot be empty.".to_string(),
+            None,
+        ));
+    }
+
     let formatted_balance_as_of_date = balance_as_of_date
         .as_ref()
         .and_then(|d| NaiveDate::parse_from_str(d, "%d-%m-%Y").ok())
